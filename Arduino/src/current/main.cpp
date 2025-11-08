@@ -1,3 +1,8 @@
+// Datum vergessen -> Nachtrag: -- Serial.print aus ReceiveEvent rausgezogen -> sendFLag2; weniger runtime in I2C Callback
+//
+
+
+
 #include <AccelStepper.h>                     //Motor Bib
 #include <Wire.h>                             //I2C Bib
 

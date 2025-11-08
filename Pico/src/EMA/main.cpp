@@ -5,6 +5,9 @@
   - Modus (0=Kalibrierung,1=PWM,2=Regel) wird vom Arduino gesetzt
   - Fehler werden auf OLED angezeigt
 */
+//xx.11.25: Ema Integration -> 300ms delay im Messloop weg; display läuft mit 2Hz in PWM Funktion
+//08.11.25: Line 346 & 395 auskommentiert. Ungenutzte Variablen
+//08.11.25: Ema Integration ohne Delays -> Tau für Messintervallunabhängigkeit
 
 #include <Wire.h>                                                 //I2C
 #include <Adafruit_GFX.h>                                         //OLED
@@ -35,13 +38,6 @@ void requestData();
 void modusKalibrierung();
 void modusPWM();
 void modusRegelbetrieb();
-
-// ======== Glättung & Debug-Schalter ========
-#define USE_EMA 1                 // 1 = EMA statt MA(100), orischinal mit 100 Samples
-#define DEBUG_SENSOR_DELAY_MS 20  // EMA Test mit 20ms debug delay (später 20 millis())
-
-// EMA-Parameter
-static const float EMA_TAU_S = 0.20f;
 
 
 #define PIN_CONFIRM 18                                            // Pin für den Bestätigungs-Knopf
@@ -131,86 +127,46 @@ float berechneTotzeit(long stepsProSekunde) {
   return t;
 }
 
+// ======== EMA-Filter für TLx493D ========
+// Läuft nicht-blockierend, 50 Hz Abtastrate (20 ms Schrittzeit)
+// Glättet die Magnetfeldmessung über X/Y/Z und gibt den Betrag zurück.
+
 float readMagnet_B_total_filtered() {
-    const int sampleCount = SAMPLE_COUNT; // aktuell 100
-    unsigned long start = millis();
-    unsigned long stop, dauer;
-    digitalWrite(LED_BUILTIN, HIGH);
+  static unsigned long lastSampleTime = 0;                // letzter Messzeitpunkt
+  static bool initialized = false;                        // erster Durchlauf?
+  static float emaX = 0.0f, emaY = 0.0f, emaZ = 0.0f;     // EMA-Zwischenspeicher
+  static float lastMagnitude = 0.0f;                      // zuletzt berechneter Betrag
 
-    // Ergebnisse, außerhalb der Zweige definiert:
-    float xm = 0.0f, ym = 0.0f, zm = 0.0f;
-    float Z  = 0.0f;
+  const unsigned long SAMPLE_PERIOD_MS = 20;              // 50 Hz
+  const float TAU_S = 0.20f;                              // Zeitkonstante -> Größer heißt Filter träger; Macht das ganze zeitabhängig und nicht abhängig von Anzahl Messungen
+  const float dt = SAMPLE_PERIOD_MS / 1000.0f;
+  const float alpha = 1.0f - expf(-dt / TAU_S);           // Wie stark verdrängt der neue Messwert den alten Wert?
 
-    if (USE_EMA) {
-        // --------- EMA-Variante (1-Pol-IIR auf Komponenten) ----------
-        static bool first = true;                                                                          // Erster Wert gesondert, da noch kein Messwert vorhanden
-        static double emaX = 0, emaY = 0, emaZ = 0;                                                        
+  const unsigned long now = millis();
+  if (now - lastSampleTime < SAMPLE_PERIOD_MS) {
+    // Noch kein neues Sample fällig → letzten Wert zurückgeben
+    return lastMagnitude;
+  }
+  lastSampleTime = now;
 
-        const float TS_S  = DEBUG_SENSOR_DELAY_MS / 1000.0f;
-        const float alpha = 1.0f - expf(-TS_S / EMA_TAU_S);                                                // EMA
-
-
-        double x, y, z;
-        if (Tlv493dMagnetic3DSensor.getMagneticFieldAndTemperature(&x, &y, &z, nullptr)) {
-            if (first) { 
-                emaX = x; 
-                emaY = y; 
-                emaZ = z; 
-                first = false; 
-            }
-
-            else {
-                emaX += alpha * (x - emaX);
-                emaY += alpha * (y - emaY);
-                emaZ += alpha * (z - emaZ);
-            }
-        }
-    
-        
-        xm = (float)emaX; ym = (float)emaY; zm = (float)emaZ;
-        Z  = xm*xm + ym*ym + zm*zm;
-        delay(DEBUG_SENSOR_DELAY_MS);
-
+  // --- Sensor auslesen (wie in deinem bestehenden Code) ---
+  double x, y, z;                                                                         // loke Variablen für Sensor (jede Achse)
+  if (Tlv493dMagnetic3DSensor.getMagneticFieldAndTemperature(&x, &y, &z, nullptr)) {
+    // --- EMA-Update auf Achsenebene ---
+    if (!initialized) {                                                                   // erster durchlauf -> ungeglättete Werte
+      emaX = (float)x; emaY = (float)y; emaZ = (float)z;
+      initialized = true;
     } else {
-        // --------- Alte MA(100)-Variante (getrimmtes Mittel) ----------
-        double valuesX[sampleCount], valuesY[sampleCount], valuesZ[sampleCount];
-
-        for (int i = 0; i < sampleCount; i++) {
-            double x, y, z;
-            if (Tlv493dMagnetic3DSensor.getMagneticFieldAndTemperature(&x, &y, &z, nullptr)) {
-                valuesX[i] = x; 
-                valuesY[i] = y; 
-                valuesZ[i] = z;
-            } else {
-                valuesX[i] = valuesY[i] = valuesZ[i] = 0;
-            }
-            delay(3); // bewusst blockierend, wie im Original (zum Vergleich)
-        }
-
-        std::sort(valuesX, valuesX + sampleCount);
-        std::sort(valuesY, valuesY + sampleCount);
-        std::sort(valuesZ, valuesZ + sampleCount);
-
-        // TRIM_N muss global definiert sein (wie in deinem Code):
-        float sx = 0, sy = 0, sz = 0;
-        for (int i = TRIM_N; i < sampleCount - TRIM_N; i++) {
-            sx += valuesX[i]; sy += valuesY[i]; sz += valuesZ[i];
-        }
-        int n = sampleCount - 2 * TRIM_N;
-        xm = sx / n; ym = sy / n; zm = sz / n;
-        Z  = xm*xm + ym*ym + zm*zm;
+      emaX += alpha * ((float)x - emaX);
+      emaY += alpha * ((float)y - emaY);
+      emaZ += alpha * ((float)z - emaZ);
     }
+  }
+  // Falls der Read fehlschlägt, behalten wir die alten EMA-Werte bei.
 
-    stop  = millis();
-    dauer = stop - start;
-
-    Serial.print("Dauer: ");
-    Serial.print(dauer);
-    Serial.print(" ms;  B= ");
-    Serial.println(Z);
-
-    digitalWrite(LED_BUILTIN, LOW);
-    return sqrtf(Z); // Betrag des Magnetfeldvektors
+  // --- Betrag berechnen und zwischenspeichern ---
+  lastMagnitude = sqrtf(emaX * emaX + emaY * emaY + emaZ * emaZ);
+  return lastMagnitude;
 }
 
 
@@ -343,7 +299,7 @@ void sendData(int16_t val) {
 }
 
 void requestData() {
-  int n = Wire.requestFrom(8, 4); // Master fragt die 4 Bytes, 2 Bytes speed + 1 Byte running + 1 Byte mode
+  //int n = Wire.requestFrom(8, 4); // Master fragt die 4 Bytes, 2 Bytes speed + 1 Byte running + 1 Byte mode
  /* Serial.print("Angefordert=4, erhalten=");
   Serial.println(n);*/
 
@@ -392,7 +348,7 @@ void setup() {
   display.setCursor(0,0); display.print("Start..."); display.display();                           //der Kollge wird dauerhaft ausgegeben im Moment -> Display Boot Problem
 
   Tlv493dMagnetic3DSensor.begin();
-  TLx493D_t* Typ = Tlv493dMagnetic3DSensor.getSensor();
+  //TLx493D_t* Typ = Tlv493dMagnetic3DSensor.getSensor();
 
 //  pid.kp=PID_KP; pid.ki=PID_KI; pid.kd=PID_KD;
 //  pid.outMin=0; pid.outMax=RPM_MAX;
