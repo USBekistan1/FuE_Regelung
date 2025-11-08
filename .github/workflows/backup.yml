@@ -1,0 +1,19 @@
+name: Auto Backup on Push
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  create_backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create backup tag
+        run: |
+          TIMESTAMP=$(date +'%Y-%m-%d_%H-%M-%S')
+          git tag "backup-$TIMESTAMP"
+          git push origin "backup-$TIMESTAMP"
