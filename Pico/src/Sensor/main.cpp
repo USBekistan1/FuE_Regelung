@@ -7,9 +7,10 @@
 
 float a = -1.07f, b = 5.67f;                                              // Koeffizienten der Kalibrierungsgeraden
 
-//Adafruit_SH1106G display(128, 64, &Wire);                                 // Selber I2C Bus -> Display Updaterate checken!!
+Adafruit_SH1106G display(128, 64, &Wire);                                 // Selber I2C Bus -> Display Updaterate checken!!
 using namespace ifx::tlx493d;
 TLx493D_A1B6 Tlv493dMagnetic3DSensor(Wire, TLx493D_IIC_ADDR_A0_e);        // Selber Bus (Sensor & Display)
+
 
 // ======== EMA-Filter für TLx493D ========
 // Läuft nicht-blockierend, 50 Hz Abtastrate (20 ms Schrittzeit)
@@ -20,6 +21,7 @@ float readMagnet_B_total_filtered() {
   static bool initialized = false;                        // erster Durchlauf?
   static float emaX = 0.0f, emaY = 0.0f, emaZ = 0.0f;     // EMA-Zwischenspeicher
   static float lastMagnitude = 0.0f;                      // zuletzt berechneter Betrag
+
 
   const unsigned long SAMPLE_PERIOD_MS = 20;              // 50 Hz
   const float TAU_S = 0.20f;                              // Zeitkonstante -> Größer heißt Filter träger; Macht das ganze zeitabhängig und nicht abhängig von Anzahl Messungen
@@ -54,6 +56,21 @@ float readMagnet_B_total_filtered() {
   return lastMagnitude;
 }
 
+void update_Display(float dIst) {
+  display.clearDisplay();
+    // Display statischen Text anzeigen
+  display.setTextSize(1.95);
+  display.setTextColor(SH110X_WHITE);
+  display.setCursor(0,24);
+  display.print("Ist-Durchm.: ");
+  display.setCursor(0,36);
+  display.print(dIst);
+  display.println(" mm");
+
+  display.display();
+  //delay(100);                                                                //mehr delay, warum?
+}
+
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
 
@@ -61,6 +78,10 @@ void setup() {
   delay(2000);      // Damit Serial genug Zeit zum starten hat
   Wire.begin();    // Sensor auf I2C0 (Pins 4/5)
   Wire.setClock(50000);  // 50 kHz
+
+   if(!display.begin(0x3C)){ while(1); }                                                           //Selbstprüfung
+  display.clearDisplay(); display.setTextSize(1); display.setTextColor(SH110X_WHITE);
+  display.setCursor(0,0); display.print("Start..."); display.display();        
 
   Tlv493dMagnetic3DSensor.begin();
   Serial.println("Starting");                                                               
@@ -70,8 +91,16 @@ void setup() {
 
 // -------- Loop ----------
 void loop() {
-    
-    float D = a*log(readMagnet_B_total_filtered())+b;
-    Serial.print(D);
+    static unsigned long lastPrintTime = 0;
+    unsigned long now = millis();
 
+    // Wert immer berechnen (Sensor-EMA läuft intern mit 50 Hz)
+    float D = a * log(readMagnet_B_total_filtered()) + b;
+
+    // Nur alle 500 ms einmal auf Serial ausgeben -> 2 Hz
+    if (now - lastPrintTime >= 500) {
+        lastPrintTime = now;
+        update_Display(D);
+        Serial.println(D);   // oder Serial.print("D = "); Serial.println(D);
+    }
 }
