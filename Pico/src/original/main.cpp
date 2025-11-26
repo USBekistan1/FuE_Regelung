@@ -321,8 +321,6 @@ void requestData() {
  /* Serial.print("Angefordert=4, erhalten=");
   Serial.println(n);*/
 
-  
-
     unsigned long startTime = millis();
     while (Wire.available() < 4) {                                            //Wartet bis alle 4 Bytes im Puffer sind
         if (millis() - startTime > 10) { // max 10 ms warten
