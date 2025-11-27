@@ -77,7 +77,7 @@ void setup() {
   Serial.begin(115200);
   delay(2000);      // Damit Serial genug Zeit zum starten hat
   Wire.begin();    // Sensor auf I2C0 (Pins 4/5)
-  Wire.setClock(50000);  // 50 kHz
+  Wire.setClock(10000);  // 50 kHz
 
    if(!display.begin(0x3C)){ while(1); }                                                           //Selbstprüfung
   display.clearDisplay(); display.setTextSize(1); display.setTextColor(SH110X_WHITE);
