@@ -134,10 +134,13 @@ void setup() {
 
   Serial.begin(115200);
   delay(2000);      // Damit Serial genug Zeit zum starten hat
+
+  Serial.println("t_s;v_m_per_min;D_mm");            // CSV-Header: Zeit [s]; Geschwindigkeit [m/min]; Durchmesser [mm]
+
   Wire.begin();    // Sensor auf I2C0 (Pins 4/5)
   Wire.setClock(100000);  // 100 kHz
 
-   if(!display.begin(0x3C)){ while(1); }                                                           //Selbstprüfung
+  if(!display.begin(0x3C)){ while(1); }                                                           //Selbstprüfung
   display.clearDisplay(); display.setTextSize(1); display.setTextColor(SH110X_WHITE);
   display.setCursor(0,0); display.print("Start..."); display.display();        
 
@@ -168,11 +171,23 @@ void loop() {
 
         update_Display(D);
 
-        Serial.print("D = ");
-        Serial.print(D);
-        Serial.print(" mm, v = ");
-        Serial.print(berechneGeschwindigkeit(current_rpm));
-        Serial.println(" m/min");
+        // --- Logging für Regelung ---
+        // ===== cd (welcher Ordner) 
+        // ===== dir (Was liegt im aktuellen Ornder?)
+        // ===== cd "Ordnername" (in Ordner wechseln); TAB vervollständigt Ordnername
+        // ===== cd .. (eine Ebene hoch)
+        // ===== pio device monitor --baud 115200 > log.csv (Dateierstellung)
+        // ===== Str + C zum Beenden des Loggens
+
+    
+        float t_s = now / 1000.0f;                  // Zeit in Sekunden
+        float v_m_per_min = berechneGeschwindigkeit(current_rpm);
+
+        Serial.print(t_s, 3);        
+        Serial.print(';');
+        Serial.print(v_m_per_min, 3); 
+        Serial.print(';');
+        Serial.println(D, 3);         
     }
 }
 
