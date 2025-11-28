@@ -11,7 +11,9 @@
 
 //float a = -0.2624, b = 2.7512;
 
-float a = -0.8962, b = 5.0466;
+//float a = -0.8962, b = 5.0466;
+
+float a = -0.9672, b = 5.2892;
 
 Adafruit_SH1106G display(128, 64, &Wire);                                 // Selber I2C Bus -> Display Updaterate checken!!
 using namespace ifx::tlx493d;

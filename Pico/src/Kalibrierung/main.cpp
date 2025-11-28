@@ -23,6 +23,15 @@ float D_vals[NUM_CAL_SAMPLES];    // Referenzdurchmesser
 float a = -1.0f, b = 0.0f;        // Koeffizienten der Kalibrierungsfunktion
 bool regressionDone = false;
 
+// ======== EMA-State (global) ========
+const unsigned long SAMPLE_PERIOD_MS = 20;  // 50 Hz
+
+unsigned long emaLastSampleTime = 0;
+bool          emaInitialized    = false;
+float         emaX = 0.0f, emaY = 0.0f, emaZ = 0.0f;
+float         emaLastMagnitude  = 0.0f;
+
+
 // ---------- Display & Sensor ----------
 
 Adafruit_SH1106G display(128, 64, &Wire);
@@ -34,30 +43,24 @@ TLx493D_A1B6 Tlv493dMagnetic3DSensor(Wire, TLx493D_IIC_ADDR_A0_e);
 // Glättet die Magnetfeldmessung über X/Y/Z und gibt den Betrag zurück.
 
 float readMagnet_B_total_filtered() {
-  static unsigned long lastSampleTime = 0;                // letzter Messzeitpunkt
-  static bool initialized = false;                        // erster Durchlauf?
-  static float emaX = 0.0f, emaY = 0.0f, emaZ = 0.0f;     // EMA-Zwischenspeicher
-  static float lastMagnitude = 0.0f;                      // zuletzt berechneter Betrag
-
-  const unsigned long SAMPLE_PERIOD_MS = 20;              // 50 Hz
   const float TAU_S = 0.20f;                              // Zeitkonstante -> Größer heißt Filter träger; Macht das ganze zeitabhängig und nicht abhängig von Anzahl Messungen
   const float dt = SAMPLE_PERIOD_MS / 1000.0f;
   const float alpha = 1.0f - expf(-dt / TAU_S);           // Wie stark verdrängt der neue Messwert den alten Wert?
 
   const unsigned long now = millis();
-  if (now - lastSampleTime < SAMPLE_PERIOD_MS) {
+  if (now - emaLastSampleTime < SAMPLE_PERIOD_MS) {
     // Noch kein neues Sample fällig → letzten Wert zurückgeben
-    return lastMagnitude;
+    return emaLastMagnitude;
   }
-  lastSampleTime = now;
+  emaLastSampleTime = now;
 
   // --- Sensor auslesen (wie in deinem bestehenden Code) ---
   double x, y, z;                                                                         // loke Variablen für Sensor (jede Achse)
   if (Tlv493dMagnetic3DSensor.getMagneticFieldAndTemperature(&x, &y, &z, nullptr)) {
     // --- EMA-Update auf Achsenebene ---
-    if (!initialized) {                                                                   // erster durchlauf -> ungeglättete Werte
+    if (!emaInitialized) {                                                                   // erster durchlauf -> ungeglättete Werte
       emaX = (float)x; emaY = (float)y; emaZ = (float)z;
-      initialized = true;
+      emaInitialized = true;
     } else {
       emaX += alpha * ((float)x - emaX);
       emaY += alpha * ((float)y - emaY);
@@ -67,8 +70,15 @@ float readMagnet_B_total_filtered() {
   // Falls der Read fehlschlägt, behalten wir die alten EMA-Werte bei.
 
   // --- Betrag berechnen und zwischenspeichern ---
-  lastMagnitude = sqrtf(emaX * emaX + emaY * emaY + emaZ * emaZ);
-  return lastMagnitude;
+  emaLastMagnitude = sqrtf(emaX * emaX + emaY * emaY + emaZ * emaZ);
+  return emaLastMagnitude;
+}
+
+void resetMagnetFilter() {          //Frische Ema für jeden neuen Stab
+  emaInitialized = false;
+  emaX = emaY = emaZ = 0.0f;
+  emaLastMagnitude = 0.0f;
+  emaLastSampleTime = 0.0f;
 }
 
 // ---------- Anzeige-Helfer ----------
@@ -167,6 +177,8 @@ void modusKalibrierung() {
     while (digitalRead(PIN_CONFIRM) == HIGH) {
       delay(50);
     }
+
+    resetMagnetFilter();
 
     // 3a. WARMUP-PHASE: EMA darf sich auf den neuen Stab einstellen
     unsigned long tStart = millis();
