@@ -94,6 +94,23 @@ void showMessage(const char* msg) {
   display.display();
 }
 
+void showCalibrationParams(float a, float b) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SH110X_WHITE);
+  display.setCursor(0, 0);
+
+  display.println("Kalibrierung OK");
+  display.println();
+  display.print("a = ");
+  display.println(a, 4);
+  display.print("b = ");
+  display.println(b, 4);
+
+  display.display();
+}
+
+
 // ---------- Regression ----------
 
 void berechneLogFunktion() {
@@ -128,6 +145,10 @@ void berechneLogFunktion() {
 // ---------- Kalibrierablauf ----------
 
 void modusKalibrierung() {
+  const unsigned long WARMUP_MS = 500;   // Zeit, damit EMA sich auf neuen Stab einstellt
+  const unsigned long SETTLE_MS = 1000;  // Zeit, über die wir für den Mittelwert sampeln
+  const unsigned long SAMPLE_DELAY_MS = 20;
+
   for (int sampleIndex = 0; sampleIndex < NUM_CAL_SAMPLES; sampleIndex++) {
     float d_real = calDiameters[sampleIndex];
 
@@ -137,43 +158,66 @@ void modusKalibrierung() {
     Serial.println(buf);
     showMessage(buf);
 
-    // 2. Auf Knopfdruck warten (aktive Low, PULLUP)
-    while (digitalRead(PIN_CONFIRM) == HIGH) {
-      delay(50); // Entprellen
-    }
+    // 2. Auf Knopfdruck warten (INPUT_PULLDOWN + Taster an 3V3)
+    // warten bis gedrückt (LOW -> HIGH)
     while (digitalRead(PIN_CONFIRM) == LOW) {
       delay(50);
     }
+    // warten bis losgelassen (HIGH -> LOW)
+    while (digitalRead(PIN_CONFIRM) == HIGH) {
+      delay(50);
+    }
 
-    // 3. Messung
-    float B = readMagnet_B_total_filtered();
-    Serial.print("B = ");
+    // 3a. WARMUP-PHASE: EMA darf sich auf den neuen Stab einstellen
+    unsigned long tStart = millis();
+    while (millis() - tStart < WARMUP_MS) {
+      (void)readMagnet_B_total_filtered();   // Wert wird verworfen, nur Filter updaten
+      delay(SAMPLE_DELAY_MS);
+    }
+
+    // 3b. SETTLE-PHASE: jetzt Werte für den Mittelwert einsammeln
+    float Bsum = 0.0f;
+    int   Bcount = 0;
+    tStart = millis();
+
+    while (millis() - tStart < SETTLE_MS) {
+      float Bnow = readMagnet_B_total_filtered();
+      Bsum += Bnow;
+      Bcount++;
+      delay(SAMPLE_DELAY_MS);
+    }
+
+    float B = (Bcount > 0) ? (Bsum / Bcount) : 0.0f;
+
+    Serial.print("B_avg[");
+    Serial.print(sampleIndex);
+    Serial.print("] = ");
     Serial.println(B, 6);
 
     if (B <= 0) {
       showError("Ungueltiger Sensorwert");
-      return;  // Kalibrierung abbrechen
+      return;
     }
 
-    // 4. Messwert speichern
     D_vals[sampleIndex] = d_real;
     F_vals[sampleIndex] = B;
   }
 
-  // 5. Regression durchführen
+  // 4. Regression durchführen
   berechneLogFunktion();
   regressionDone = true;
 
-  // 6. Erfolgsmeldung
-  showMessage("Kalibrierung OK");
+  // 5. Parameter anzeigen
+  showCalibrationParams(a, b);  // deine Anzeige-Funktion für a,b
   delay(2000);
 }
+
 
 // ---------- Setup & Loop ----------
 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(PIN_CONFIRM, INPUT_PULLUP);
+  pinMode(PIN_CONFIRM, INPUT_PULLDOWN);           // Knopf and GP18 und 3V3 (nicht ground)
 
   Serial.begin(115200);
   delay(2000); // Serial hochkommen lassen
@@ -207,10 +251,9 @@ void loop() {
   static bool done = false;
 
   if (!done) {
-    modusKalibrierung();        // Einmal Kalibrierung durchlaufen
+    modusKalibrierung();   // Einmal komplette Kalibrierung durchführen
     done = true;
 
-    // Danach a und b nochmal deutlich ausgeben
     Serial.println("---- Ergebnis ----");
     Serial.print("a = ");
     Serial.println(a, 6);
@@ -218,9 +261,10 @@ void loop() {
     Serial.println(b, 6);
     Serial.println("------------------");
 
-    showMessage("Fertig");
+    showCalibrationParams(a, b);
   }
 
-  // LED signalisiert "Fertig"
-  digitalWrite(LED_BUILTIN, millis() / 500 % 2);
+  // Optisches Lebenszeichen: LED blinkt langsam
+  digitalWrite(LED_BUILTIN, (millis() / 500) % 2);
 }
+

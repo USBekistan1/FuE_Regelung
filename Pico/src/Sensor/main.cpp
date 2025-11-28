@@ -5,7 +5,13 @@
 #include <math.h>
 #include <algorithm>
 
-float a = -1.07f, b = 5.67f;                                              // Koeffizienten der Kalibrierungsgeraden
+// float a = -1.07f, b = 5.67f;                                              // Koeffizienten der Kalibrierungsgeraden (oiginal)
+
+//float a = -0.8932, b = 6.3685;                                            // Mittel aus den drei Werten der ersten Kalibrierung
+
+//float a = -0.2624, b = 2.7512;
+
+float a = -0.8962, b = 5.0466;
 
 Adafruit_SH1106G display(128, 64, &Wire);                                 // Selber I2C Bus -> Display Updaterate checken!!
 using namespace ifx::tlx493d;
