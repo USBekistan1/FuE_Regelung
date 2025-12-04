@@ -13,8 +13,8 @@
 
 #define PIN_CONFIRM 18            // Pin für den Bestätigungs-Knopf
 
-#define NUM_CAL_SAMPLES 5
-const float calDiameters[NUM_CAL_SAMPLES] = {1.6f, 1.7f, 1.75f, 1.8f, 1.9f};
+#define NUM_CAL_SAMPLES 9
+const float calDiameters[NUM_CAL_SAMPLES] = {1.0f, 1.2f, 1.4f, 1.6f, 1.7f, 1.75f, 1.8f, 1.9f, 2.0f};
 
 // ---------- Globale Variablen für Kalibrierung ----------
 

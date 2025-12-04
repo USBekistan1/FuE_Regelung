@@ -15,7 +15,13 @@
 
 //float a = -0.9242, b = 5.1471;                                        //Interpolation (nicht gut)
 
-float a = -0.9672, b = 5.2892;                                          //perfekt zwischen 1,6mm und 1,7mm
+//float a = -0.9672, b = 5.2892;                                          //perfekt zwischen 1,6mm und 1,7mm
+
+//float a = -1.2415, b = 6.2856;                                            //alte Logik, warum anders?
+
+float a = -1.1563, b = 5.9946;                                          // 9 Messpunkte, sehr gut zwischen 1-2mm
+
+//float a = -1.0608, b = 5.6301;                                          // Auch ohne Stab kalibriert -> Größere Abweichungen zwischen 1 und 2mm                             
 
 unsigned long now =0; 
 
