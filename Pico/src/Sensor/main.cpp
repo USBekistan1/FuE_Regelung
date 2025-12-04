@@ -11,9 +11,13 @@
 
 //float a = -0.2624, b = 2.7512;
 
-//float a = -0.8962, b = 5.0466;
+//float a = -0.8962, b = 5.0466;                                          
 
-float a = -0.9672, b = 5.2892;
+//float a = -0.9242, b = 5.1471;                                        //Interpolation (nicht gut)
+
+float a = -0.9672, b = 5.2892;                                          //perfekt zwischen 1,6mm und 1,7mm
+
+unsigned long now =0; 
 
 Adafruit_SH1106G display(128, 64, &Wire);                                 // Selber I2C Bus -> Display Updaterate checken!!
 using namespace ifx::tlx493d;
@@ -97,13 +101,15 @@ void setup() {
 
 }
 
+float D= 0;
+static unsigned long lastPrintTime = 0;
+
 // -------- Loop ----------
 void loop() {
-    static unsigned long lastPrintTime = 0;
-    unsigned long now = millis();
+      now = millis();                                             
 
     // Wert immer berechnen (Sensor-EMA läuft intern mit 50 Hz)
-    float D = a * log(readMagnet_B_total_filtered()) + b;
+    D = a * log(readMagnet_B_total_filtered()) + b;
 
     // Nur alle 500 ms einmal auf Serial ausgeben -> 2 Hz
     if (now - lastPrintTime >= 500) {
