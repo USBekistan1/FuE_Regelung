@@ -321,6 +321,7 @@ void setup() {
 
   Wire.begin();    // Sensor auf I2C0 (Pins 4/5)
   Wire.setClock(100000);  // 100 kHz
+  Wire.setTimeout(50);
 
   if(!display.begin(0x3C)){ while(1); }                                                           //Selbstprüfung
   display.clearDisplay(); display.setTextSize(1); display.setTextColor(SH110X_WHITE);
