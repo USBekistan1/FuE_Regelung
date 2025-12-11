@@ -61,12 +61,6 @@ volatile int16_t receivedSpeed = 0;
 volatile int debugSpeed;
 bool debugRun, debugMode;
 
-// EEPROM
-const int EEPROM_ADDR_MAGIC = 0;
-const int EEPROM_ADDR_A     = 4;
-const int EEPROM_ADDR_B     = 8;
-const uint32_t EEPROM_MAGIC = 0x4E696C73;
-
 // Gespeicherte Kalibrierung
 float calA = 0.0f;
 float calB = 0.0f;
@@ -89,7 +83,6 @@ void setup() {
   stepper.setMaxSpeed(3000);                  // Grenzen für Motor
   stepper.setAcceleration(50);
 
-  KalibrierungLaden();                        //EEPROM
   Serial.print("EEPROM Kalibrierung: a=");
   Serial.print(calA, 6);
   Serial.print(" , b=");
@@ -205,24 +198,6 @@ void updateEncoder() {                                          // Aufgerufen be
 
 // --- I2C Funktionen ---
 // --- Master fragt Daten ab ---
-
-void KalibrierungLaden() {
-  uint32_t magic = 0;
-  EEPROM.get(EEPROM_ADDR_MAGIC, magic);
-  if (magic == EEPROM_MAGIC) {
-    EEPROM.get(EEPROM_ADDR_A, calA);
-    EEPROM.get(EEPROM_ADDR_B, calB);
-  } else {
-    calA = 0.0f;
-    calB = 0.0f;
-  }
-}
-
-void KalibrierungSpeichern(float a, float b) {
-  EEPROM.put(EEPROM_ADDR_MAGIC, EEPROM_MAGIC);
-  EEPROM.put(EEPROM_ADDR_A, a);
-  EEPROM.put(EEPROM_ADDR_B, b);
-}
 
 void requestEvent() {                                           // Slave sendet 4 Bytes auf Abfrage
   Wire.write((currentSpeed >> 8) & 0xFF);                       // I2C Schnittstelle immer 1 Byte auf einmal -> 16 bit aufgeteilt

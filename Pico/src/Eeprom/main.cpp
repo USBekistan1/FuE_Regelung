@@ -5,7 +5,10 @@
 #include <math.h>
 #include <algorithm>
 
-#define SLAVE_ADDR 0x08
+// --- Flash ---
+#include "hardware/flash.h"
+#include "hardware/sync.h"
+#include <string.h>   // für memset/memcpy
 
 float berechneGeschwindigkeit(long stepsProSekunde);
 float readMagnet_B_total_filtered();
@@ -18,9 +21,8 @@ void showCalibrationParams(float a, float b);
 void modusKalibrierung();
 void resetMagnetFilter();
 void berechneLogFunktion();
-
-bool KalibrierungLaden();
-void KalibrierungSenden(float a, float b);
+void saveCalibrationToFlash(float aNew, float bNew);
+bool loadCalibrationFromFlash();
 
 
 Adafruit_SH1106G display(128, 64, &Wire);                                 // Selber I2C Bus -> Display Updaterate checken!!
@@ -31,11 +33,24 @@ TLx493D_A1B6 Tlv493dMagnetic3DSensor(Wire, TLx493D_IIC_ADDR_A0_e);        // Sel
 #define PIN_CONFIRM 18            // Pin für den Bestätigungs-Knopf
 
 #define NUM_CAL_SAMPLES 9
-const float calDiameters[NUM_CAL_SAMPLES] = {1.0f, 1.2f, 1.4f, 1.6f , 1.7f, 1.75f, 1.8f, 1.9f, 2.0f};
+const float calDiameters[NUM_CAL_SAMPLES] = {1.0f, 1.2f, 1.4f, 1.6f, 1.7f, 1.75f, 1.8f, 1.9f, 2.0f};
 float a = -1.1563, b = 5.9946;                                              // Koeffizienten der Kalibrierungsgeraden
 float F_vals[NUM_CAL_SAMPLES];    // Sensorwerte (B-Betrag)
 float D_vals[NUM_CAL_SAMPLES];    // Referenzdurchmesser
 bool regressionDone = false;
+
+// ----- Flash-Speicher für Kalibrierung auf dem Pico -----
+#define FLASH_TARGET_OFFSET (256 * 1024)  // 256 kB hinter Programmanfang
+#define CALIB_MAGIC 0x4E696C73            // 'Nils' als Magic
+
+struct CalibData {
+    uint32_t magic;
+    float a;
+    float b;
+};
+
+// Zeiger auf den Kalibrierbereich im Flash (XIP-Adresse)
+const CalibData* const flashCalib = (const CalibData*)(XIP_BASE + FLASH_TARGET_OFFSET);
 
 
 // ----- EMA -----
@@ -58,7 +73,6 @@ volatile int16_t targetSpeed = 0;                                         // Zie
 volatile int16_t current_rpm = 0;                                         // Ist-Geschwindigkeit
 volatile bool mode = false;                                               // Default Regelbetrieb
 volatile bool isrunning = true;                                           // warum volatile? Keine ISR oder? Juckt wahrscheinlich nicht
-
 
 
 
@@ -177,7 +191,9 @@ void modusKalibrierung() {
   // 5. Parameter anzeigen
   showCalibrationParams(a, b);  // deine Anzeige-Funktion für a,b
   delay(2000);
-  KalibrierungSenden(a, b);
+
+  // 6. Kalibrierung im Flash speichern
+  saveCalibrationToFlash(a, b);
 }
 
 void berechneLogFunktion() {
@@ -209,6 +225,41 @@ void berechneLogFunktion() {
   } else {
     showError("Regression fehlgeschlagen");
   }
+}
+
+bool loadCalibrationFromFlash() {
+    if (flashCalib->magic != CALIB_MAGIC) {
+        Serial.println("Flash-Kalibrierung: kein gueltiger Eintrag");
+        return false;
+    }
+
+    a = flashCalib->a;
+    b = flashCalib->b;
+
+    Serial.print("Flash-Kalibrierung geladen: a=");
+    Serial.print(a, 6);
+    Serial.print(" , b=");
+    Serial.println(b, 6);
+
+    return true;
+}
+
+void saveCalibrationToFlash(float aNew, float bNew) {
+    CalibData data;
+    data.magic = CALIB_MAGIC;
+    data.a = aNew;
+    data.b = bNew;
+
+    uint8_t buf[FLASH_PAGE_SIZE];
+    memset(buf, 0xFF, sizeof(buf));
+    memcpy(buf, &data, sizeof(data));
+
+    uint32_t irq_state = save_and_disable_interrupts();
+    flash_range_erase(FLASH_TARGET_OFFSET, FLASH_SECTOR_SIZE);
+    flash_range_program(FLASH_TARGET_OFFSET, buf, FLASH_PAGE_SIZE);
+    restore_interrupts(irq_state);
+
+    Serial.println("Kalibrierung im Flash gespeichert");
 }
 
 void update_Display(float dIst) {
@@ -289,7 +340,7 @@ bool requestData() {
     const uint8_t expected = 4;
 
     // Master fragt 4 Bytes beim Uno (Adresse 0x08) an
-    uint8_t received = Wire.requestFrom(SLAVE_ADDR, expected);  
+    uint8_t received = Wire.requestFrom(0x08, expected);  
 
     if (received != expected) {
         Serial.print("I2C Fehler: erwartet 4, bekommen ");
@@ -309,58 +360,6 @@ bool requestData() {
     mode        = modeVal;
 
     return true;
-}
-
-bool KalibrierungLaden() {
-  Wire.beginTransmission(SLAVE_ADDR);
-  Wire.write(0x10);
-  uint8_t err = Wire.endTransmission();
-
-  if (err != 0) {
-    Serial.print("I2C Fehler GET_CAL, Code: ");
-    Serial.println(err);
-    return false;
-  }
-
-  delay(5);  
-
-  uint8_t expected = 8; 
-  uint8_t received = Wire.requestFrom(SLAVE_ADDR, expected);
-  if (received != expected) {
-    Serial.print("GET_CAL: falsche Byteanzahl: ");
-    Serial.println(received);
-    while (Wire.available()) Wire.read();
-    return false;
-  }
-
-  union { uint8_t b[4]; float f; } ua, ub;
-  for (int i = 0; i < 4; ++i) ua.b[i] = Wire.read();
-  for (int i = 0; i < 4; ++i) ub.b[i] = Wire.read();
-
-  a = ua.f;
-  b = ub.f;
-
-  Serial.print("Kalibrierung vom Arduino geladen: a=");
-  Serial.print(a, 6);
-  Serial.print(" , b=");
-  Serial.println(b, 6);
-
-  return true;
-}
-
-void KalibrierungSenden(float aVal, float bVal) {
-  union { uint8_t b[4]; float f; } ua, ub;
-  ua.f = aVal;
-  ub.f = bVal;
-
-  Wire.beginTransmission(SLAVE_ADDR);
-  Wire.write(0x11);
-  for (int i = 0; i < 4; ++i) Wire.write(ua.b[i]);
-  for (int i = 0; i < 4; ++i) Wire.write(ub.b[i]);
-  uint8_t err = Wire.endTransmission();
-
-  Serial.print("Sende Kalibrierung an Arduino, I2C Err=");
-  Serial.println(err);
 }
 
 float berechneGeschwindigkeit(long stepsProSekunde) {
@@ -396,9 +395,12 @@ void setup() {
   Serial.println("Starting");                                                               
   delay(2500); 
 
-  if (!KalibrierungLaden()) {
-    Serial.println("Keine gueltige Kalibrierung geladen");
-  } 
+  if (!loadCalibrationFromFlash()) {
+    Serial.println("Keine gueltige Flash-Kalibrierung, nutze Defaults aus dem Code");
+    // a und b bleiben bei -1.1563 und 5.9946
+  } else {
+    Serial.println("Flash-Kalibrierung aktiv");
+  }
 }
 
 // -------- Loop ----------
@@ -406,7 +408,7 @@ void loop() {
     unsigned long now = millis();
 
     if (!regressionDone) {
-    showMessage("Kalibrieren?\nKurz drücken: Nein\nLang Drücken: Ja", 1);
+    showMessage("Kalibrieren?\nKurz druecken: Nein\nLang Druecken: Ja", 1);
 
     // Warten bis der Knopf EINMAL gedrueckt wird (LOW -> HIGH)
     while (digitalRead(PIN_CONFIRM) == LOW) {
