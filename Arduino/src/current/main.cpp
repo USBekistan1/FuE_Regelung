@@ -11,7 +11,7 @@
 
 #define DIR_PIN 5                     
 #define STEP_PIN 6
-#define modeButton 7
+#define modeButton 7                          //Vermutlich Mode Switch??
 #define buttonStart 8
 #define buttonStop 9
 #define outputLED 10

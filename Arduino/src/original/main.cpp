@@ -14,7 +14,8 @@
 void updateEncoder();
 void requestEvent();
 void receiveEvent(int);
-void handleEncoder();
+void handleEncoder_MAN();
+void handleEncoder_Auto();
 
 
 // Rotary Encoder
@@ -125,12 +126,13 @@ void loop() {
   // Steuerung abhängig vom Modus
   if (isrunning) {
     if (Controllmode == 0) {
-      handleEncoder();
+      handleEncoder_Man();
     } else if (Controllmode == 1) {
       if (desiredSpeed != currentSpeed) {
         currentSpeed = desiredSpeed;
         stepper.setSpeed(-currentSpeed); // Vorzeichen für korrekte Richtung
       }
+      handleEncoder_Auto();
     }
   }
 
@@ -138,7 +140,7 @@ void loop() {
 }
 
 // --- Encoder Verarbeitung ---
-void handleEncoder() {
+void handleEncoder_Man() {
   unsigned long now = millis();
   if (now - lastDebounceTime > debounceDelay) {
     lastDebounceTime = now;
@@ -150,6 +152,15 @@ void handleEncoder() {
     }
   }
 }
+void handleEncoder_Auto(){
+  unsigned long now = millis();
+  if (now - lastDebounceTime > debounceDelay) {
+    lastDebounceTime = now;
+
+    desiredSpeed = encoderPos;
+  } 
+}
+
 
 // --- Encoder ISR ---
 void updateEncoder() {

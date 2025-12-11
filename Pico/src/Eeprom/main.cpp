@@ -13,7 +13,8 @@
 float berechneGeschwindigkeit(long stepsProSekunde);
 float readMagnet_B_total_filtered();
 float B_to_D(float B);
-void update_Display(float dIst);
+void update_Display_Man(float dIst);
+void update_Display_Auto(float dSoll);
 bool requestData();
 void showError(const char* msg);
 void showMessage(const char* msg, int TextSize);
@@ -23,6 +24,8 @@ void resetMagnetFilter();
 void berechneLogFunktion();
 void saveCalibrationToFlash(float aNew, float bNew);
 bool loadCalibrationFromFlash();
+void ManMode();
+void AutoMode();
 
 
 Adafruit_SH1106G display(128, 64, &Wire);                                 // Selber I2C Bus -> Display Updaterate checken!!
@@ -262,9 +265,9 @@ void saveCalibrationToFlash(float aNew, float bNew) {
     Serial.println("Kalibrierung im Flash gespeichert");
 }
 
-void update_Display(float dIst) {
+void update_Display_Man(float dIst) {
   display.clearDisplay();
-    // Display statischen Text anzeigen
+  // Display statischen Text anzeigen
   display.setTextSize(1.95);
   display.setTextColor(SH110X_WHITE);
   float speed_m_per_min = berechneGeschwindigkeit(current_rpm);  
@@ -281,6 +284,20 @@ void update_Display(float dIst) {
 
   display.display();
   //delay(100);                                                                //mehr delay, warum?
+}
+
+void update_Display_Auto(float dSoll){
+  display.clearDisplay();
+  // Display statischen Text anzeigen
+  display.setTextSize(1.95);
+  display.setTextColor(SH110X_WHITE);
+  display.setCursor(0,24);
+  display.print("Soll-Durchm.: ");
+  display.setCursor(0,36);
+  display.print(dSoll);
+  display.println(" mm");
+
+  display.display();
 }
 
 void showError(const char* msg) {
@@ -369,6 +386,50 @@ float berechneGeschwindigkeit(long stepsProSekunde) {
   return v_mPerMin;
 }
 
+void ManMode(){
+  unsigned long now = millis();
+  // --- I2C: alle 200 ms den Uno abfragen ---
+  static unsigned long lastI2C = 0;
+  if (now - lastI2C >= 200) {
+    lastI2C = now;
+    requestData();   // aktualisiert current_rpm
+  }
+
+  // --- Magnetfeld -> Durchmesser ---
+  float D = a * log(readMagnet_B_total_filtered()) + b;
+
+  // --- Anzeige + Serial alle 200 ms ---
+  static unsigned long lastPrintTime = 0;
+  if (now - lastPrintTime >= 200) {
+    lastPrintTime = now;
+
+    update_Display_Man(D);
+
+    float t_s = now / 1000.0f;                  // Zeit in Sekunden
+    float v_m_per_min = berechneGeschwindigkeit(current_rpm);
+
+    Serial.print(t_s, 3);        
+    Serial.print(';');
+    Serial.print(v_m_per_min, 3); 
+    Serial.print(';');
+    Serial.println(D, 3);         
+  }
+}
+
+void AutoMode(){
+  unsigned long now = millis();
+  showMessage("Hier koennte\nihr Code \nintegriert sein :)", 1);
+
+  delay(100);
+  static unsigned long lastI2C = 0;
+    if (now - lastI2C >= 200) {
+        lastI2C = now;
+        requestData();   
+    }
+  //float dSoll = current_rpm/30;
+  //update_Display_Auto(dSoll);
+}
+
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
   pinMode(PIN_CONFIRM, INPUT_PULLDOWN);
@@ -403,65 +464,47 @@ void setup() {
   }
 }
 
-// -------- Loop ----------
 void loop() {
-    unsigned long now = millis();
+  static unsigned long lastI2C = 0;
+  unsigned long now = millis();
 
-    if (!regressionDone) {
-    showMessage("Kalibrieren?\nKurz druecken: Nein\nLang Druecken: Ja", 1);
+  if (!regressionDone) {
+  showMessage("Kalibrieren?\nKurz druecken: Nein\nLang Druecken: Ja", 1);
 
-    // Warten bis der Knopf EINMAL gedrueckt wird (LOW -> HIGH)
-    while (digitalRead(PIN_CONFIRM) == LOW) {
-        delay(50);   
+  // Warten bis der Knopf EINMAL gedrueckt wird (LOW -> HIGH)
+  while (digitalRead(PIN_CONFIRM) == LOW) {
+      delay(50);   
+  }
+
+  unsigned long start = millis();
+  delay(50);   // Entprellen
+
+  while(digitalRead(PIN_CONFIRM) == HIGH){
+    if (millis()-start >= 2000){
+      showMessage("Kalibrierung wird\ngestartet", 1);
+      delay (2000);
+      modusKalibrierung();
     }
-
-    unsigned long start = millis();
-    delay(50);   // Entprellen
-
-    while(digitalRead(PIN_CONFIRM) == HIGH){
-      if (millis()-start >= 2000){
-        showMessage("Kalibrierung wird\ngestartet", 1);
-        delay (2000);
-        modusKalibrierung();
-      }
-    }
+  }
     regressionDone = true;  // Frage nur einmal stellen
   }
 
-    // --- I2C: alle 50 ms den Uno abfragen ---
-    static unsigned long lastI2C = 0;
-    if (now - lastI2C >= 200) {
-        lastI2C = now;
-        requestData();                   // aktualisiert current_rpm
-    }
-
-    // --- Magnetfeld -> Durchmesser ---
-    float D = a * log(readMagnet_B_total_filtered()) + b;
-
-    // --- Anzeige + Serial alle 500 ms ---
-    static unsigned long lastPrintTime = 0;
-    if (now - lastPrintTime >= 200) {
-        lastPrintTime = now;
-
-        update_Display(D);
-
-        // --- Logging für Regelung ---
-        // ===== cd (welcher Ordner) 
-        // ===== dir (Was liegt im aktuellen Ornder?)
-        // ===== cd "Ordnername" (in Ordner wechseln); TAB vervollständigt Ordnername
-        // ===== cd .. (eine Ebene hoch)
-        // ===== pio device monitor --baud 115200 > log.txt (Dateierstellung)
-        // ===== Str + C zum Beenden des Loggens
-
-    
-        float t_s = now / 1000.0f;                  // Zeit in Sekunden
-        float v_m_per_min = berechneGeschwindigkeit(current_rpm);
-
-        Serial.print(t_s, 3);        
-        Serial.print(';');
-        Serial.print(v_m_per_min, 3); 
-        Serial.print(';');
-        Serial.println(D, 3);         
-    }
+  if (now - lastI2C >= 200) {
+    lastI2C = now;
+    requestData();   
+  }
+  
+  if (!mode){
+    ManMode();
+  }else{
+    AutoMode();
+  }
 }
 
+// --- Logging für Regelung ---
+// ===== cd (welcher Ordner) 
+// ===== dir (Was liegt im aktuellen Ornder?)
+// ===== cd "Ordnername" (in Ordner wechseln); TAB vervollständigt Ordnername
+// ===== cd .. (eine Ebene hoch)
+// ===== pio device monitor --baud 115200 > log.txt (Dateierstellung)
+// ===== Str + C zum Beenden des Loggens
