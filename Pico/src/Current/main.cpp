@@ -387,7 +387,7 @@ void loop() {
         // ===== dir (Was liegt im aktuellen Ornder?)
         // ===== cd "Ordnername" (in Ordner wechseln); TAB vervollständigt Ordnername
         // ===== cd .. (eine Ebene hoch)
-        // ===== pio device monitor --baud 115200 > log.txt (Dateierstellung)
+        // ===== pio device monitor --baud 115200 > Mess1.txt (Dateierstellung)
         // ===== Str + C zum Beenden des Loggens
 
     
