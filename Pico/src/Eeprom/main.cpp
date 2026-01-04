@@ -266,20 +266,20 @@ void saveCalibrationToFlash(float aNew, float bNew) {
 }
 
 void update_Display_Man(float dIst) {
+  float speed_m_per_min = berechneGeschwindigkeit(current_rpm);  
   display.clearDisplay();
   // Display statischen Text anzeigen
   display.setTextSize(1.95);
   display.setTextColor(SH110X_WHITE);
-  float speed_m_per_min = berechneGeschwindigkeit(current_rpm);  
   display.setCursor(0, 0);
   display.print("Speed: ");
-  display.setCursor(0, 12);
-  display.print(speed_m_per_min, 1);
+  //display.setCursor(0, 12);
+  display.println(speed_m_per_min, 1);
   display.print(" m/min");
-  display.setCursor(0,24);
-  display.print("Ist-Durchm.: ");
-  display.setCursor(0,36);
-  display.print(dIst);
+  //display.setCursor(0,24);
+  display.println("Ist-Durchm.: ");
+  //display.setCursor(0,36);
+  display.println(dIst);
   display.println(" mm");
 
   display.display();
@@ -287,16 +287,22 @@ void update_Display_Man(float dIst) {
 }
 
 void update_Display_Auto(float dSoll){
+  float dIst = a * log(readMagnet_B_total_filtered()) + b;
+  float speed_m_per_min = berechneGeschwindigkeit(current_rpm);  
   display.clearDisplay();
   // Display statischen Text anzeigen
   display.setTextSize(1.95);
   display.setTextColor(SH110X_WHITE);
-  display.setCursor(0,24);
+  display.setCursor(0,0);
   display.print("Soll-Durchm.: ");
-  display.setCursor(0,36);
-  display.print(dSoll);
+  display.println(dSoll);
   display.println(" mm");
-
+  display.println("Ist-Durchm.: ");
+  display.println(dIst);
+  display.print(" mm");
+  display.println("Speed:");
+  display.println(speed_m_per_min);
+  display.print(" m/min");
   display.display();
 }
 
@@ -412,7 +418,7 @@ void ManMode(){
     Serial.print(';');
     Serial.print(v_m_per_min, 3); 
     Serial.print(';');
-    Serial.println(D, 3);         
+    Serial.println(D, 3);        
   }
 }
 
@@ -422,10 +428,10 @@ void AutoMode(){
 
   delay(100);
   static unsigned long lastI2C = 0;
-    if (now - lastI2C >= 200) {
-        lastI2C = now;
-        requestData();   
-    }
+  if (now - lastI2C >= 200) {
+      lastI2C = now;
+      requestData();   
+  }
   //float dSoll = current_rpm/30;
   //update_Display_Auto(dSoll);
 }
@@ -469,23 +475,23 @@ void loop() {
   unsigned long now = millis();
 
   if (!regressionDone) {
-  showMessage("Kalibrieren?\nKurz druecken: Nein\nLang Druecken: Ja", 1);
+    showMessage("Kalibrieren?\nKurz druecken: Nein\nLang Druecken: Ja", 1);
 
-  // Warten bis der Knopf EINMAL gedrueckt wird (LOW -> HIGH)
-  while (digitalRead(PIN_CONFIRM) == LOW) {
+    // Warten bis der Knopf EINMAL gedrueckt wird (LOW -> HIGH)
+    while (digitalRead(PIN_CONFIRM) == LOW) {
       delay(50);   
-  }
-
-  unsigned long start = millis();
-  delay(50);   // Entprellen
-
-  while(digitalRead(PIN_CONFIRM) == HIGH){
-    if (millis()-start >= 2000){
-      showMessage("Kalibrierung wird\ngestartet", 1);
-      delay (2000);
-      modusKalibrierung();
     }
-  }
+
+    unsigned long start = millis();
+    delay(50);   // Entprellen
+
+    while(digitalRead(PIN_CONFIRM) == HIGH){
+      if (millis()-start >= 2000){
+        showMessage("Kalibrierung wird\ngestartet", 1);
+        delay (2000);
+        modusKalibrierung();
+      }
+    }
     regressionDone = true;  // Frage nur einmal stellen
   }
 
