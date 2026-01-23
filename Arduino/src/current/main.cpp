@@ -18,7 +18,8 @@ const int PIN_B = 3;
 // --- Variablen für Speed & Rampe ---
 volatile float currentSpeed = 0.0;    
 volatile float targetSpeed = 0.0;     
-float acceleration = 50.0;           // Steps/sec²
+float accelMan = 400.0;           // Steps/sec²
+float accelAuto = 25.0f;              // ≈ 0,3 m/min pro Sekunde
 
 // Encoder Variablen
 volatile long encoderPos = 60;        
@@ -99,12 +100,14 @@ void updateRamp()
 
     float timeStep = dt / 1000000.0; 
 
+    float acc = isAutoMode ? accelAuto : accelMan;      //getrennte Rampen für manuell und Automatik
+
     if (currentSpeed < targetSpeed) {
-        currentSpeed += acceleration * timeStep;
+        currentSpeed += acc * timeStep;
         if (currentSpeed > targetSpeed) currentSpeed = targetSpeed;
     } 
     else if (currentSpeed > targetSpeed) {
-        currentSpeed -= acceleration * timeStep;
+        currentSpeed -= acc * timeStep;
         if (currentSpeed < targetSpeed) currentSpeed = targetSpeed;
     }
 
