@@ -1,223 +1,271 @@
-// Datum vergessen -> Nachtrag: -- Serial.print aus ReceiveEvent rausgezogen -> sendFLag2; weniger runtime in I2C Callback
-//
+#include <Wire.h>
+#include <Arduino.h>
 
+#define SLAVE_ADDR 0x08
 
+// --- Pin Definitionen ---
+#define DIR_PIN   5
+#define STEP_PIN  6
+#define MODE_BUTTON_PIN 7
+#define START_BUTTON_PIN 8
+#define STOP_BUTTON_PIN 9
+#define LED_PIN 10
 
-#include <AccelStepper.h>                     //Motor Bib
-#include <Wire.h>                             //I2C Bib
-#include <EEPROM.h>
-
-#define SLAVE_ADDR 0x08                       //I2C Adresse Arduino; und Slave
-
-#define DIR_PIN 5                     
-#define STEP_PIN 6
-#define modeButton 7                          //Vermutlich Mode Switch??
-#define buttonStart 8
-#define buttonStop 9
-#define outputLED 10
-
-//---Funnktionsdeklarationen---
-void updateEncoder();
-void requestEvent();
-void receiveEvent(int);
-void handleEncoder();
-
-void KalibrierungLaden();
-void KalibrierungSpeichern(float a, float b);
-
-// Rotary Encoder
-const int PIN_A = 2;                          // Interrupt fähige Pins (korrekt)
+// Encoder
+const int PIN_A = 2;
 const int PIN_B = 3;
-const int PIN_SWITCH = 4;
 
-// Stop-Taster Debounce 
-const unsigned long stableTime = 50;          // Signal muss 50ms stabil bleiben (gegen Tasterprellen)
-unsigned long signalStartTime = 0;          
-bool signalStable = false;
+// --- Variablen für Speed & Rampe ---
+volatile float currentSpeed = 0.0;    
+volatile float targetSpeed = 0.0;     
+float acceleration = 50.0;           // Steps/sec²
 
-// Encoder-Variablen
-volatile int encoderPos = 60;                 // Startwert für Geschwindigkeit
-volatile bool aSet = false;                   // Volatile -> Variable immer aus Speicher gelesen und Änderungen sofort zurückgeschrieben; wichtig für interrupt
+// Encoder Variablen
+volatile long encoderPos = 60;        
+volatile bool aSet = false;
 
-int currentSpeed = 30;                        // Gesetzer Wert an Stepper
-volatile int desiredSpeed = 60;               // Soll von Encoder/I2C -> Startwert, weil zu Beginn noch keine Daten
-
-// Modus / Laufzustand; Status Flags
-bool mode = false;                            // Manuell; Automatik
-bool isrunning = false;                       // Läuft Motor?
-bool Controllmode = false;                    // Same wie mode?!
-
-// Debounce für Encoder
-const unsigned long debounceDelay = 50;       // übernimmt encoder Wert alle 50ms
-unsigned long lastDebounceTime = 0;
-
-// Motor
-AccelStepper stepper(AccelStepper::DRIVER, STEP_PIN, DIR_PIN);            // Driver Mode -> Steuersignale and Motortreiber
-
-
-volatile bool sendFlag = false;                // Debug Daten für I2C
+// I2C Kommunikation
+volatile bool sendFlag = false;
 volatile bool sendFlag2 = false;
 volatile int16_t receivedSpeed = 0;
-volatile int debugSpeed;
-bool debugRun, debugMode;
+volatile int16_t desiredSpeed = 0;
 
-// Gespeicherte Kalibrierung
-float calA = 0.0f;
-float calB = 0.0f;
+// Minimale und Maximale OCR Werte
+const unsigned int MIN_OCR = 100;     
+const unsigned int MAX_OCR = 65000;   
 
+// --- Status-Variablen ---
+bool isRunning = false;       
+bool isAutoMode = false;      
 
+// Variablen für die Stop-Entprellung (Gegen Geister-Stopps)
+unsigned long stopSignalStartTime = 0;
+bool stopSignalStable = false;
+const unsigned long stableTime = 50; 
 
-void setup() {
-  pinMode(PIN_A, INPUT_PULLUP);   
-  pinMode(PIN_B, INPUT_PULLUP);
-  pinMode(PIN_SWITCH, INPUT_PULLUP);
-  pinMode(modeButton, INPUT_PULLUP);
-  pinMode(buttonStart, INPUT_PULLUP);
-  pinMode(buttonStop, INPUT_PULLUP);
-  pinMode(outputLED, OUTPUT);
-
-  attachInterrupt(digitalPinToInterrupt(PIN_A), updateEncoder, CHANGE);           // Interrupt wenn change an Pin A
-
-  Serial.begin(9600);
-
-  stepper.setMaxSpeed(3000);                  // Grenzen für Motor
-  stepper.setAcceleration(50);
-
-  Serial.print("EEPROM Kalibrierung: a=");
-  Serial.print(calA, 6);
-  Serial.print(" , b=");
-  Serial.println(calB, 6);
-
-  Wire.begin(SLAVE_ADDR);                     // Startet I2C im Slave Modus
-  Wire.onRequest(requestEvent);               // Master liest, Arduino antwortet
-  Wire.onReceive(receiveEvent);               // Master schreibt, Arduino empfängt
+// -----------------------------------------------------------------------------
+// TIMER1 ISR: Erzeugt die Pulse
+// -----------------------------------------------------------------------------
+ISR(TIMER1_COMPA_vect)
+{
+    PORTD |= (1 << 6);   // STEP_PIN HIGH
+    __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t"); 
+    __asm__("nop\n\t""nop\n\t""nop\n\t""nop\n\t"); 
+    PORTD &= ~(1 << 6);  // STEP_PIN LOW
 }
 
-void loop() {
-  // Outsourced Serial print in normale Loop -> Serial zu langsam für Callback (mega smart)
-  if (sendFlag) {                                           // Wird in callback Schleife true gesetzt
-    sendFlag = false;                                       // Beendet callback flag -> wird erst wieder nach neuem callback Input durchlaufen
-    Serial.print("Slave -> Master gesendet: Speed=");       // serial outputs in normaler Loop
-    Serial.print(debugSpeed);
-    Serial.print(", Running=");
-    Serial.print(debugRun);
-    Serial.print(", Mode=");
-    Serial.println(debugMode);
-  }
+// -----------------------------------------------------------------------------
+// Berechnet den Timer-Wert (OCR1A) und setzt die Richtung
+// -----------------------------------------------------------------------------
+void setTimerFrequency(float speed)
+{
+    // RICHTUNG GEÄNDERT:
+    // Wenn speed >= 0 ist, setzen wir den Pin jetzt auf LOW (vorher HIGH).
+    if (speed >= 0) {
+        PORTD &= ~(1 << 5); // DIR_PIN LOW
+    } else {
+        PORTD |= (1 << 5);  // DIR_PIN HIGH
+    }
 
-  if (sendFlag2) {
-    sendFlag2 = false;
-    noInterrupts();                                             //Keine ISR beim lesen globaler Variablen -> Kaputte Werte
-    int16_t rx = receivedSpeed;                                 // atomar kopieren
+    float absSpeed = abs(speed);
+
+    if (absSpeed < 1.0) {
+        TIMSK1 &= ~(1 << OCIE1A); 
+        return;
+    }
+
+    TIMSK1 |= (1 << OCIE1A); 
+    long ocr_val = (16000000L / (8L * (long)absSpeed)) - 1;
+
+    if (ocr_val < MIN_OCR) ocr_val = MIN_OCR;
+    if (ocr_val > MAX_OCR) ocr_val = MAX_OCR;
+
+    noInterrupts();
+    OCR1A = (unsigned int)ocr_val;
     interrupts();
-    Serial.print("Slave <- Master empfangen: ");                // !!!Serial eigentlich zu langsam für I2C Callback; Könnte Probleme machen!!!
-    Serial.println(rx);
-  }
+}
 
-  //unsigned long now = millis();                             // Zeitstempel --- Momentan ungenutzt
+// -----------------------------------------------------------------------------
+// Rampe berechnen
+// -----------------------------------------------------------------------------
+void updateRamp()
+{
+    static unsigned long lastUpdate = 0;
+    unsigned long now = micros();
+    unsigned long dt = now - lastUpdate;
 
-  // Mode Button prüfen
-  mode = (digitalRead(modeButton) == LOW);                    // Aktiv wenn Eingangspin 0V
-  Controllmode = mode ? 1 : 0;                                // ? -> 1 wenn true; 0 wenn false -> Ist doch voll überflüßsig? Warum nicht einfach eine bool?
+    if (dt < 2000) return; 
+    lastUpdate = now;
 
-    static bool lastMode = false;                             // Übernimmt bei Moduswechsel aktuellen Speed als Sollwert -> Sanfter Übergang
-  if (mode != lastMode) {
-    desiredSpeed = currentSpeed;  // aktuellen Wert übernehmen
-    lastMode = mode;
-  }
+    float timeStep = dt / 1000000.0; 
 
-  // Start-Taster
-  if (digitalRead(buttonStart) == LOW) {
- //   Serial.println("Start Button Pressed");
-    isrunning = true;
-    digitalWrite(outputLED, HIGH);                            // LED an wenn Motor läüft
-  }
-
-  // Stop-Taster
-  int reading = digitalRead(buttonStop);                      // Stoppt Motor
-  if (reading == LOW && !signalStable) {                      // prüft nur wenn Signal noch nicht als stabil gilt 
-    if (millis() - signalStartTime > stableTime) {            // stabil ab 50ms
-      signalStable = true;
-    //  Serial.println("Stop Button Pressed");
-      isrunning = false;                                      // dann motor aus -> Entprellen
-      digitalWrite(outputLED, LOW);
-      stepper.setSpeed(0);
-      // Encoderwert zurücksetzen optional
-      encoderPos = 60;                                        // Zurücksetzen auf default speed
+    if (currentSpeed < targetSpeed) {
+        currentSpeed += acceleration * timeStep;
+        if (currentSpeed > targetSpeed) currentSpeed = targetSpeed;
+    } 
+    else if (currentSpeed > targetSpeed) {
+        currentSpeed -= acceleration * timeStep;
+        if (currentSpeed < targetSpeed) currentSpeed = targetSpeed;
     }
-  } else if (reading == HIGH) {
-    signalStartTime = millis();
-    signalStable = false;
-  }
 
-  // Steuerung abhängig vom Modus
-  if (isrunning) {
-    if (Controllmode == 0) {                                  // mode 0 -> Sollwert vom Encoder
-      handleEncoder();
-    } else if (Controllmode == 1) {                           // I2C mode
-      if (desiredSpeed != currentSpeed) {
-        currentSpeed = desiredSpeed;
-        stepper.setSpeed(-currentSpeed);                      // Vorzeichen für korrekte Richtung
-      }
+    setTimerFrequency(currentSpeed);
+}
+
+// -----------------------------------------------------------------------------
+// Encoder ISR
+// -----------------------------------------------------------------------------
+void updateEncoder()
+{
+    bool newA = (PIND & (1 << 2)); 
+    bool newB = (PIND & (1 << 3)); 
+
+    if (newA != aSet) {
+        aSet = newA;
+        if (newA == newB) encoderPos++;
+        else encoderPos--;
+
+        // Begrenzung (Wieder auf 0-3000 wie im alten Code, falls gewünscht)
+        if (encoderPos < 0) encoderPos = 0; 
+        if (encoderPos > 3000) encoderPos = 3000;
     }
-  }
-
-  stepper.runSpeed();                                         // Keine Rampe für sanfte Tempoanpassung?! -> Vmtl kein Problem mit Regelung/Encoder; Vlt trotzdem einfügen
 }
 
-// --- Encoder Verarbeitung ---
-void handleEncoder() {
-  unsigned long now = millis();
-  if (now - lastDebounceTime > debounceDelay) {                // alle 50ms abgefragt
-    lastDebounceTime = now;
-
-    desiredSpeed = encoderPos;                                 // neuer desired speed
-    if (desiredSpeed != currentSpeed) {
-      currentSpeed = desiredSpeed;                             // set speed
-      stepper.setSpeed(-currentSpeed);                         // Vorzeichen anpassen
-    }
-  }
+// -----------------------------------------------------------------------------
+// I2C Callbacks
+// -----------------------------------------------------------------------------
+void requestEvent() {
+    int16_t speedToSend = (int16_t)currentSpeed;
+    Wire.write((speedToSend >> 8) & 0xFF);
+    Wire.write(speedToSend & 0xFF);
+    Wire.write(isRunning ? 1 : 0);
+    Wire.write(isAutoMode ? 1 : 0);
+    sendFlag = true;
 }
 
-// --- Encoder ISR ---
-void updateEncoder() {                                          // Aufgerufen bei Encoder change (ISR)
-  bool newA = digitalRead(PIN_A);
-  bool newB = digitalRead(PIN_B);
-
-  if (newA != aSet) {                                           // nur auf Flanke von A reagieren; B bestimmt Richtung
-    aSet = newA;
-
-    if (newA == newB) encoderPos++;                             // Vorwärts
-    else encoderPos--;                                          // Rückwärts
-
-    // Begrenzung auf 0-3000
-    if (encoderPos < 0) encoderPos = 0;
-    if (encoderPos > 3000) encoderPos = 3000;
-  }
-}
-
-// --- I2C Funktionen ---
-// --- Master fragt Daten ab ---
-
-void requestEvent() {                                           // Slave sendet 4 Bytes auf Abfrage
-  Wire.write((currentSpeed >> 8) & 0xFF);                       // I2C Schnittstelle immer 1 Byte auf einmal -> 16 bit aufgeteilt
-  Wire.write(currentSpeed & 0xFF);
-  Wire.write(isrunning ? 1 : 0);
-  Wire.write(Controllmode ? 1 : 0);
-
-  debugSpeed = currentSpeed;
-  debugRun   = isrunning;
-  debugMode  = Controllmode;
-  sendFlag = true;                                              // debug im nächsten Durchlauf
-}
-
-void receiveEvent(int howMany) {                                // Slave empfängt 2 Bytes
-    if (howMany < 2) return;                                    // Abbruch bei weniger 2 Bytes
-
-    byte highByte = Wire.read();                                // 16bit wieder aufgeteilt
+void receiveEvent(int howMany) {
+    if (howMany < 2) return;
+    byte highByte = Wire.read();
     byte lowByte  = Wire.read();
-
-    receivedSpeed = (highByte << 8) | lowByte;                  // Bytes kombinieren
+    receivedSpeed = (highByte << 8) | lowByte;
     desiredSpeed = receivedSpeed;
     sendFlag2 = true;
+    while (Wire.available()) {
+    Wire.read();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Setup
+// -----------------------------------------------------------------------------
+void setup() {
+    pinMode(DIR_PIN, OUTPUT);
+    pinMode(STEP_PIN, OUTPUT);
+    pinMode(MODE_BUTTON_PIN, INPUT_PULLUP);
+    pinMode(START_BUTTON_PIN, INPUT_PULLUP);
+    pinMode(STOP_BUTTON_PIN, INPUT_PULLUP);
+    pinMode(LED_PIN, OUTPUT);
+    pinMode(PIN_A, INPUT_PULLUP);
+    pinMode(PIN_B, INPUT_PULLUP);
+
+    attachInterrupt(digitalPinToInterrupt(PIN_A), updateEncoder, CHANGE);
+    Serial.begin(9600);
+
+    // Timer 1 Setup
+    noInterrupts();
+    TCCR1A = 0;
+    TCCR1B = 0;
+    TCNT1  = 0;
+    TCCR1B |= (1 << WGM12); 
+    TCCR1B |= (1 << CS11);  
+    OCR1A = 60000; 
+    TIMSK1 |= (1 << OCIE1A);
+    interrupts();
+
+    Wire.begin(SLAVE_ADDR);
+    Wire.onRequest(requestEvent);
+    Wire.onReceive(receiveEvent);
+    
+    targetSpeed = 0;
+    currentSpeed = 0;
+}
+
+// -----------------------------------------------------------------------------
+// Main loop
+// -----------------------------------------------------------------------------
+void loop() {
+    unsigned long now = millis();
+
+    // 1. Mode Taster Polling
+    isAutoMode = (digitalRead(MODE_BUTTON_PIN) == LOW);
+
+    //if (digitalRead(MODE_BUTTON_PIN) == LOW) {
+     //   delay(50); 
+     //   if (digitalRead(MODE_BUTTON_PIN) == LOW) {
+     //        isAutoMode = !isAutoMode;
+      //       while(digitalRead(MODE_BUTTON_PIN) == LOW); 
+      //       if (!isAutoMode) {
+      //           encoderPos = (long)currentSpeed;
+      //       }
+      //  }
+    //}
+
+    //Wechselerkennung -> Handover
+    static bool lastAuto = false;
+
+    // Detect mode change
+    if (isAutoMode != lastAuto) {
+        if (isAutoMode) {
+        // MAN -> AUTO: starte Auto mit dem aktuellen Manual-Sollwert
+        receivedSpeed = (int16_t)encoderPos;     // Auto bekommt "aktuellen Manual-Wert"
+    } else {
+        // AUTO -> MAN: starte Manual mit dem aktuellen Auto-Sollwert (oder currentSpeed)
+        encoderPos = (long)receivedSpeed;        // Encoder springt auf Auto-Wert
+    // alternativ: encoderPos = (long)currentSpeed;
+    }
+    lastAuto = isAutoMode;
+}
+
+    // Start Taster
+    if (digitalRead(START_BUTTON_PIN) == LOW) {
+        isRunning = true;
+        digitalWrite(LED_PIN, HIGH);
+    }
+
+    // --- STOP Taster mit Sicherheits-Entprellung ---
+    int stopReading = digitalRead(STOP_BUTTON_PIN);
+    if (stopReading == LOW && !stopSignalStable) {
+        if (millis() - stopSignalStartTime > stableTime) {
+            stopSignalStable = true;
+            isRunning = false;
+            digitalWrite(LED_PIN, LOW);
+            encoderPos = 60; 
+        }
+    } else if (stopReading == HIGH) {
+        stopSignalStartTime = millis();
+        stopSignalStable = false;
+    }
+
+    // 2. Soll-Geschwindigkeit festlegen
+    if (!isRunning) {
+        targetSpeed = 0;
+    } 
+    else {
+        if (isAutoMode) {
+            targetSpeed = (float)receivedSpeed;
+            encoderPos = receivedSpeed;
+        } else {
+            targetSpeed = (float)encoderPos;
+        }
+    }
+
+    // 3. Rampe und Timer updaten
+    updateRamp();
+
+    // 4. Debugging Ausgaben
+    static unsigned long lastPrint = 0;
+    if (now - lastPrint > 500) {
+        lastPrint = now;
+        Serial.print("Mode: "); Serial.print(isAutoMode ? "AUTO" : "MANU");
+        Serial.print(" | Speed: "); Serial.println(currentSpeed);
+    }
 }

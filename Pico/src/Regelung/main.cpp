@@ -400,13 +400,6 @@ float berechneGeschwindigkeit(long stepsProSekunde) {
 
 void ManMode(){
   unsigned long now = millis();
-  // --- I2C: alle 200 ms den Uno abfragen ---
-  static unsigned long lastI2C = 0;
-  if (now - lastI2C >= 200) {
-    lastI2C = now;
-    requestData();   // aktualisiert current_rpm
-  }
-
   // --- Magnetfeld -> Durchmesser ---
   float D = a * log(readMagnet_B_total_filtered()) + b;
 
@@ -458,7 +451,6 @@ void sendSpeedToSlave(int16_t speedSteps) {
 
 void AutoMode() {
   unsigned long now = millis();
-
   // --- 1) Durchmesser messen (mit Schutz gegen log(<=0)) ---
   float B = readMagnet_B_total_filtered();
   float dIst = NAN;
@@ -487,14 +479,14 @@ void AutoMode() {
   }
 
   // --- 3) Status vom Arduino lesen (READ) zeitlich versetzt ---
-  static unsigned long lastRead = 0;
-  const unsigned long READ_PERIOD_MS = 200;
-  const unsigned long READ_OFFSET_MS = 80; // Abstand nach dem Write
+  //static unsigned long lastRead = 0;
+  //const unsigned long READ_PERIOD_MS = 200;
+  //const unsigned long READ_OFFSET_MS = 80; // Abstand nach dem Write
 
-  if (now - lastRead >= READ_PERIOD_MS && (now - lastWrite) >= READ_OFFSET_MS) {
-    lastRead = now;
-    requestData();
-  }
+  //if (now - lastRead >= READ_PERIOD_MS && (now - lastWrite) >= READ_OFFSET_MS) {
+   // lastRead = now;
+   // requestData();
+  //}
 
   // --- 4) Anzeige ---
   // (du willst dSoll anzeigen, aber auch dIst – beides ist sinnvoll)
@@ -579,15 +571,28 @@ void loop() {
     regressionDone = true;  // Frage nur einmal stellen
   }
 
-  if (now - lastI2C >= 200) {      //I2C doppelt gemoppelt
-    lastI2C = now;
-    requestData();   
-  }
-  
   if (!mode){
     ManMode();
   }else{
     AutoMode();
+  }
+
+     // Zentraler I2C-Read: aktualisiert current_rpm/isrunning/mode
+  if (now - lastI2C >= 200) {
+    lastI2C = now;
+
+    bool ok = requestData();
+    if (!ok) {
+      Serial.println("requestData() FAIL");
+      // optional: mode NICHT anfassen (machst du eh), aber du siehst es im Log
+    } else {
+      Serial.print("I2C OK: mode=");
+      Serial.print(mode);
+      Serial.print(" running=");
+      Serial.print(isrunning);
+      Serial.print(" speed=");
+      Serial.println(current_rpm);
+    }
   }
 }
 
