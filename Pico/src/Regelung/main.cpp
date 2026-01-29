@@ -14,7 +14,8 @@ float berechneGeschwindigkeit(long stepsProSekunde);
 float readMagnet_B_total_filtered();
 float B_to_D(float B);
 void update_Display_Man(float dIst);
-void update_Display_Auto(float dSoll, float dIst);
+void update_Display_Auto(float dSoll, float dIst, bool rampDone);
+void update_Display_Sollwahl(float dSoll);
 bool requestData();
 void showError(const char* msg);
 void showMessage(const char* msg, int TextSize);
@@ -83,8 +84,18 @@ volatile bool isrunning = true;                                           // war
 
 // ---- Vorsteuerung ----
 const float CONST_C = 5.939;       // Prozesskonstante
-float sollDurchmesser = 2.0;       // Dein gewünschter Zieldurchmesser in mm
+float sollDurchmesser = 1.75;       // Dein gewünschter Zieldurchmesser in mm
 int16_t calculatedSteps = 0;       // Der berechnete Wert für den Arduino
+bool rampDone = 0;
+static unsigned long pressStart = 0;
+enum AutoState : uint8_t { AUTO_SETPOINT, AUTO_FEEDFORWARD, AUTO_REG };
+AutoState autoState = AUTO_SETPOINT;
+volatile int16_t encDelta = 0;
+
+// ---- Regelung ----
+const float REG_KI = 200.0f;
+float integralSum = 0.0f;
+const float INTEGRAL_MAX = 1000.0f;
 
 // ======== EMA-Filter für TLx493D ========
 // Läuft nicht-blockierend, 50 Hz Abtastrate (20 ms Schrittzeit)
@@ -293,22 +304,46 @@ void update_Display_Man(float dIst) {
   //delay(100);                                                                //mehr delay, warum?
 }
 
-void update_Display_Auto(float dSoll, float dIst){
+void update_Display_Auto(float dSoll, float dIst, bool rampDone){
   float speed_m_per_min = berechneGeschwindigkeit(current_rpm);  
+
   display.clearDisplay();
-  // Display statischen Text anzeigen
   display.setTextSize(1.95);
   display.setTextColor(SH110X_WHITE);
   display.setCursor(0,0);
-  display.print("Soll-Durchm.: ");
-  display.println(dSoll);
+
+  display.print("Soll: ");
+  display.print(dSoll, 2);
   display.println(" mm");
-  display.println("Ist-Durchm.: ");
-  display.println(dIst);
-  display.print(" mm");
-  display.println("Speed:");
-  display.println(speed_m_per_min);
-  display.print(" m/min");
+
+  display.print("Ist : ");
+  display.print(dIst, 2);
+  display.println(" mm");
+
+  display.print("Speed: ");
+  display.print(speed_m_per_min, 1);
+  display.println(" m/min");
+
+  display.print("AUTO: ");
+  display.println(rampDone ? "Regler aktiv" : "Vorsteuerung -> Knopf drücken wenn Durchm. stabil");
+
+  display.display();
+}
+
+void update_Display_Sollwahl(float dSoll){
+  display.clearDisplay();
+  display.setTextSize(1.95);
+  display.setTextColor(SH110X_WHITE);
+  display.setCursor(0,0);
+
+  display.print("Soll: ");
+  display.print(dSoll, 2);
+  display.println(" mm");
+
+  display.println();
+
+  display.print("Mit Knopf bestaetigen");
+
   display.display();
 }
 
@@ -366,13 +401,13 @@ void showCalibrationParams(float a, float b) {
 }
 
 bool requestData() {
-    const uint8_t expected = 4;
+    const uint8_t expected = 6;
 
     // Master fragt 4 Bytes beim Uno (Adresse 0x08) an
     uint8_t received = Wire.requestFrom(0x08, expected);  
 
     if (received != expected) {
-        Serial.print("I2C Fehler: erwartet 4, bekommen ");
+        Serial.print("I2C Fehler: erwartet 6, bekommen ");
         Serial.println(received);
 
         // Buffer leeren, falls Schrott drin ist
@@ -384,9 +419,12 @@ bool requestData() {
     bool running    = Wire.read();
     bool modeVal    = Wire.read();
 
+    int16_t delta = (int16_t)((Wire.read() << 8) | Wire.read());
+
     current_rpm = speed;
     isrunning   = running;
     mode        = modeVal;
+    encDelta    = delta;
 
     return true;
 }
@@ -400,6 +438,11 @@ float berechneGeschwindigkeit(long stepsProSekunde) {
 
 void ManMode(){
   unsigned long now = millis();
+  autoState   = AUTO_SETPOINT;
+  rampDone    = false;
+  integralSum = 0.0f;
+  pressStart  = 0;  
+
   // --- Magnetfeld -> Durchmesser ---
   float D = a * log(readMagnet_B_total_filtered()) + b;
 
@@ -451,6 +494,40 @@ void sendSpeedToSlave(int16_t speedSteps) {
 
 void AutoMode() {
   unsigned long now = millis();
+  static unsigned long lastWrite = 0;
+  const unsigned long WRITE_PERIOD_MS = 200;
+
+  // --- 0) Sollwert Einstellen
+  if (autoState == AUTO_SETPOINT) {
+    if (encDelta != 0) {
+      sollDurchmesser += 0.01f * (float)encDelta;
+
+      // Limits setzen
+      if (sollDurchmesser < 1.50f) sollDurchmesser = 1.50f;
+      if (sollDurchmesser > 2.20f) sollDurchmesser = 2.20f;
+
+      encDelta = 0;   // WICHTIG: Delta "verbrauchen"
+    }
+    // Anzeige: SETPOINT
+    // (baue dir gern "AUTO: Sollwahl" ins Display)
+    update_Display_Sollwahl(sollDurchmesser);
+
+    // Bestätigen per Hold-to-confirm
+    if (digitalRead(PIN_CONFIRM) == HIGH) {
+      if (pressStart == 0) pressStart = now;
+        if (now - pressStart >= 300) {
+          pressStart  = 0;
+          integralSum = 0.0f;
+          rampDone    = false;                 // Regler noch AUS
+          autoState   = AUTO_FEEDFORWARD;      // weiter: Vorsteuerung-only
+        }
+    } else {
+      pressStart = 0;
+    }
+
+    return; // im SETPOINT-State nichts senden/regeln
+  }
+
   // --- 1) Durchmesser messen (mit Schutz gegen log(<=0)) ---
   float B = readMagnet_B_total_filtered();
   float dIst = NAN;
@@ -459,38 +536,92 @@ void AutoMode() {
   }
 
   // --- 2) Vorsteuerung berechnen und an Arduino senden (WRITE) ---
-  static unsigned long lastWrite = 0;
-  const unsigned long WRITE_PERIOD_MS = 200;
+  if (!rampDone){
+      if (now - lastWrite >= WRITE_PERIOD_MS) {
+      lastWrite = now;
 
-  if (now - lastWrite >= WRITE_PERIOD_MS) {
-    lastWrite = now;
+      int16_t cmdSteps = 0;
 
-    int16_t cmdSteps = 0;
+      // Nur senden, wenn running + gültiger Sensorwert
+      if (isrunning && !isnan(dIst) && isfinite(dIst)) {
+        cmdSteps = berechneStepsAusDurchmesser(sollDurchmesser);
+      } else {
+        cmdSteps = 0;
+      }
 
-    // Nur senden, wenn running + gültiger Sensorwert
-    if (isrunning && !isnan(dIst) && isfinite(dIst)) {
-      cmdSteps = berechneStepsAusDurchmesser(sollDurchmesser);
-    } else {
-      cmdSteps = 0;
+      targetSpeed = cmdSteps;
+      sendSpeedToSlave(cmdSteps);
     }
-
-    targetSpeed = cmdSteps;
-    sendSpeedToSlave(cmdSteps);
   }
 
-  // --- 3) Status vom Arduino lesen (READ) zeitlich versetzt ---
-  //static unsigned long lastRead = 0;
-  //const unsigned long READ_PERIOD_MS = 200;
-  //const unsigned long READ_OFFSET_MS = 80; // Abstand nach dem Write
+  if (!rampDone) {
+    if (digitalRead(PIN_CONFIRM) == HIGH) {
+      if (pressStart == 0) pressStart = millis();          // Startzeit merken
+        if (millis() - pressStart >= 300) {
+          rampDone   = true;
+          integralSum = 0.0f;                               // sauberer Übergang
+          pressStart  = 0;                                  // reset (optional)
+        }
+      } else {
+        pressStart = 0;                                       // losgelassen → zurücksetzen
+      }
+  } else {
+    pressStart = 0;                                           // wenn schon aktiv, Timer sauber halten
+  }
 
-  //if (now - lastRead >= READ_PERIOD_MS && (now - lastWrite) >= READ_OFFSET_MS) {
-   // lastRead = now;
-   // requestData();
-  //}
+  // ---- 3) Regelung ----
+  if(rampDone){
+    if (now - lastWrite >= WRITE_PERIOD_MS) {
+      // Delta-Zeit (dt) berechnen, damit das Integral mathematisch korrekt ist (Fehler * Zeit)
+      float dt = (now - lastWrite) / 1000.0f; 
+      lastWrite = now;
+
+      int16_t cmdSteps = 0;
+
+      // Sicherheitsabfrage: Regeln wir nur, wenn der Motor läuft und der Sensor OK ist
+      if (isrunning && !isnan(dIst) && isfinite(dIst)) {
+      
+        // A) Vorsteuerung (Feedforward): Die Basis-Geschwindigkeit aus dem Modell
+        int16_t steps_feedforward = berechneStepsAusDurchmesser(sollDurchmesser);
+      
+        // B) I-Anteil berechnen (Feedback)
+        // Fehler berechnen: Ist > Soll (zu dick) -> Fehler positiv -> Wir müssen schneller werden
+        float abweichung = dIst - sollDurchmesser;
+      
+        // Integral bilden: Alter Wert + (Fehler * vergangene Zeit)
+        integralSum += abweichung * dt;
+
+        // !!! Anti-Windup !!!
+        // Begrenzt den Speicher, damit er nicht "überläuft", wenn der Fehler lange besteht.
+        if (integralSum > INTEGRAL_MAX) integralSum = INTEGRAL_MAX;
+        if (integralSum < -INTEGRAL_MAX) integralSum = -INTEGRAL_MAX;
+
+        // Den I-Anteil in Steps umrechnen
+        float steps_correction = integralSum * REG_KI;
+
+        // C) Zusammenführen: Gesamtspeed = Modellwert + Korrekturwert
+        cmdSteps = steps_feedforward + (int16_t)steps_correction;
+
+        // Grenzwerte des Motors einhalten
+        if (cmdSteps < 0) cmdSteps = 0;
+        if (cmdSteps > 3000) cmdSteps = 3000;
+
+        } else {
+          // WICHTIG: Wenn Motor aus ist, Integral resetten!
+          // Sonst merkt er sich den "Fehler" vom Stillstand und rast beim Starten los.
+          cmdSteps = 0;
+          integralSum = 0.0f;
+        }
+
+      targetSpeed = cmdSteps;
+      sendSpeedToSlave(cmdSteps);
+    }
+  }
+
 
   // --- 4) Anzeige ---
-  // (du willst dSoll anzeigen, aber auch dIst – beides ist sinnvoll)
-  update_Display_Auto(sollDurchmesser, dIst);
+  update_Display_Auto(sollDurchmesser, dIst, rampDone);
+
 
   // --- 5) Logging (optional, passt super fürs Tuning) ---
   static unsigned long lastPrint = 0;
