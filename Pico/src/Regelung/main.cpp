@@ -93,7 +93,7 @@ AutoState autoState = AUTO_SETPOINT;
 volatile int16_t encDelta = 0;
 
 // ---- Regelung ----
-const float REG_KI = 200.0f;
+const float REG_KI = 50.0f;
 float integralSum = 0.0f;
 const float INTEGRAL_MAX = 1000.0f;
 
@@ -102,22 +102,20 @@ const float INTEGRAL_MAX = 1000.0f;
 // Glättet die Magnetfeldmessung über X/Y/Z und gibt den Betrag zurück.
 
 float readMagnet_B_total_filtered() {
-  const float TAU_S = 0.20f;                              // Zeitkonstante -> Größer heißt Filter träger; Macht das ganze zeitabhängig und nicht abhängig von Anzahl Messungen
+  const float TAU_S = 0.20f;
   const float dt = SAMPLE_PERIOD_MS / 1000.0f;
-  const float alpha = 1.0f - expf(-dt / TAU_S);           // Wie stark verdrängt der neue Messwert den alten Wert?
-
+  const float alpha = 1.0f - expf(-dt / TAU_S);
   const unsigned long now = millis();
   if (now - emaLastSampleTime < SAMPLE_PERIOD_MS) {
-    // Noch kein neues Sample fällig → letzten Wert zurückgeben
     return emaLastMagnitude;
   }
   emaLastSampleTime = now;
-
-  // --- Sensor auslesen (wie in deinem bestehenden Code) ---
-  double x, y, z;                                                                         // loke Variablen für Sensor (jede Achse)
+  double x, y, z;
+  
+ 
   if (Tlv493dMagnetic3DSensor.getMagneticFieldAndTemperature(&x, &y, &z, nullptr)) {
-    // --- EMA-Update auf Achsenebene ---
-    if (!emaInitialized) {                                                                   // erster durchlauf -> ungeglättete Werte
+    // FALL: Sensor funktioniert
+    if (!emaInitialized) {
       emaX = (float)x; emaY = (float)y; emaZ = (float)z;
       emaInitialized = true;
     } else {
@@ -125,11 +123,20 @@ float readMagnet_B_total_filtered() {
       emaY += alpha * ((float)y - emaY);
       emaZ += alpha * ((float)z - emaZ);
     }
+    // Betrag berechnen
+    emaLastMagnitude = sqrtf(emaX * emaX + emaY * emaY + emaZ * emaZ);
+  } 
+  else {
+    // FALL: Sensor liefert keine Daten
+ ;
+    
+    // Versuche den Sensor neu zu starten (wie im setup)
+    Tlv493dMagnetic3DSensor.begin(); 
+    
+    // Filter zurücksetzen, damit er beim nächsten Erfolg sofort 
+    // den neuen echten Wert nimmt und nicht vom alten "Freeze-Wert" langsam rübergleitet
+    emaInitialized = false; 
   }
-  // Falls der Read fehlschlägt, behalten wir die alten EMA-Werte bei.
-
-  // --- Betrag berechnen und zwischenspeichern ---
-  emaLastMagnitude = sqrtf(emaX * emaX + emaY * emaY + emaZ * emaZ);
   return emaLastMagnitude;
 }
 
@@ -495,7 +502,7 @@ void sendSpeedToSlave(int16_t speedSteps) {
 void AutoMode() {
   unsigned long now = millis();
   static unsigned long lastWrite = 0;
-  const unsigned long WRITE_PERIOD_MS = 200;
+  const unsigned long WRITE_PERIOD_MS = 20000;
 
   // --- 0) Sollwert Einstellen
   if (autoState == AUTO_SETPOINT) {
@@ -503,8 +510,8 @@ void AutoMode() {
       sollDurchmesser += 0.01f * (float)encDelta;
 
       // Limits setzen
-      if (sollDurchmesser < 1.50f) sollDurchmesser = 1.50f;
-      if (sollDurchmesser > 2.20f) sollDurchmesser = 2.20f;
+      if (sollDurchmesser < 1.50f) sollDurchmesser = 1.75f;
+      if (sollDurchmesser > 2.20f) sollDurchmesser = 1.75f;
 
       encDelta = 0;   // WICHTIG: Delta "verbrauchen"
     }
@@ -537,7 +544,7 @@ void AutoMode() {
 
   // --- 2) Vorsteuerung berechnen und an Arduino senden (WRITE) ---
   if (!rampDone){
-      if (now - lastWrite >= WRITE_PERIOD_MS) {
+    if (now - lastWrite >= WRITE_PERIOD_MS) {
       lastWrite = now;
 
       int16_t cmdSteps = 0;
