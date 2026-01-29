@@ -30,6 +30,7 @@ volatile bool sendFlag = false;
 volatile bool sendFlag2 = false;
 volatile int16_t receivedSpeed = 0;
 volatile int16_t desiredSpeed = 0;
+static long lastEncPosForI2C = 0;
 
 // Minimale und Maximale OCR Werte
 const unsigned int MIN_OCR = 100;     
@@ -133,15 +134,29 @@ void updateEncoder()
     }
 }
 
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
 // I2C Callbacks
-// -----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
 void requestEvent() {
     int16_t speedToSend = (int16_t)currentSpeed;
+
+    long encNow = encoderPos;                  
+    long diffL  = encNow - lastEncPosForI2C;
+    lastEncPosForI2C = encNow;
+
+    if (diffL >  32767) diffL =  32767;
+    if (diffL < -32768) diffL = -32768;
+    int16_t encDelta = (int16_t)diffL;
+
     Wire.write((speedToSend >> 8) & 0xFF);
     Wire.write(speedToSend & 0xFF);
+
     Wire.write(isRunning ? 1 : 0);
     Wire.write(isAutoMode ? 1 : 0);
+
+    Wire.write((encDelta >> 8) & 0xFF);
+    Wire.write(encDelta & 0xFF);
+
     sendFlag = true;
 }
 
@@ -226,7 +241,7 @@ void loop() {
     // alternativ: encoderPos = (long)currentSpeed;
     }
     lastAuto = isAutoMode;
-}
+    }
 
     // Start Taster
     if (digitalRead(START_BUTTON_PIN) == LOW) {
