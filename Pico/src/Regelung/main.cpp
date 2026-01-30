@@ -27,6 +27,7 @@ void saveCalibrationToFlash(float aNew, float bNew);
 bool loadCalibrationFromFlash();
 void ManMode();
 void AutoMode();
+bool i2c_bus_recover();
 
 //Regelung
 int16_t berechneStepsAusDurchmesser(float d_soll);
@@ -75,12 +76,17 @@ float         emaLastMagnitude  = 0.0f;
 const int STEPS_PER_REV = 800;                  // Schritte pro Umdrehung
 const float DIAMETER = 0.05;                    // Durchmesser der Welle in Metern
 const float CIRCUMFERENCE = PI * DIAMETER;      // Umfang in Metern
+static unsigned long lastDisp = 0;
 
 // -------- I2C ----------
 volatile int16_t targetSpeed = 0;                                         // Zielgeschwindigkeit, 2 Byte
 volatile int16_t current_rpm = 0;                                         // Ist-Geschwindigkeit
 volatile bool mode = false;                                               // Default Regelbetrieb
 volatile bool isrunning = true;                                           // warum volatile? Keine ISR oder? Juckt wahrscheinlich nicht
+
+// --- I2C Bus Recovery (Pico Arduino) ---
+static const int I2C_SDA_PIN = 4;
+static const int I2C_SCL_PIN = 5;
 
 // ---- Vorsteuerung ----
 const float CONST_C = 5.939;       // Prozesskonstante
@@ -106,6 +112,10 @@ float readMagnet_B_total_filtered() {
   const float dt = SAMPLE_PERIOD_MS / 1000.0f;
   const float alpha = 1.0f - expf(-dt / TAU_S);
   const unsigned long now = millis();
+   
+  static unsigned long lastReinit = 0;
+  const unsigned long REINIT_PERIOD_MS = 500;               // Frequenz mit der Sensor neugestartet wird
+
   if (now - emaLastSampleTime < SAMPLE_PERIOD_MS) {
     return emaLastMagnitude;
   }
@@ -127,15 +137,19 @@ float readMagnet_B_total_filtered() {
     emaLastMagnitude = sqrtf(emaX * emaX + emaY * emaY + emaZ * emaZ);
   } 
   else {
-    // FALL: Sensor liefert keine Daten
- ;
-    
-    // Versuche den Sensor neu zu starten (wie im setup)
-    Tlv493dMagnetic3DSensor.begin(); 
-    
-    // Filter zurücksetzen, damit er beim nächsten Erfolg sofort 
-    // den neuen echten Wert nimmt und nicht vom alten "Freeze-Wert" langsam rübergleitet
-    emaInitialized = false; 
+    emaInitialized = false;
+
+    if (now - lastReinit > REINIT_PERIOD_MS) {
+      lastReinit = now;
+
+      // Erst Bus-Recovery versuchen, dann Sensor neu starten
+      bool rec = i2c_bus_recover();
+      Serial.println(rec ? "I2C rec OK (sensor)" : "I2C rec FAIL (sensor)");
+
+      Tlv493dMagnetic3DSensor.begin();
+    }
+
+    return NAN; 
   }
   return emaLastMagnitude;
 }
@@ -436,6 +450,56 @@ bool requestData() {
     return true;
 }
 
+bool i2c_bus_recover() {
+  // 1) I2C "stoppen" – je nach Core gibt's kein Wire.end()
+  // Wir machen stattdessen GPIO-Recovery direkt.
+
+  // 2) Pins als GPIO open-drain-like: INPUT_PULLUP (High über Pullup)
+  pinMode(I2C_SDA_PIN, INPUT_PULLUP);
+  pinMode(I2C_SCL_PIN, INPUT_PULLUP);
+  delayMicroseconds(5);
+
+  // Wenn SCL LOW ist, hält jemand den Clock low -> schwerer Fall (z.B. Slave kaputt)
+  if (digitalRead(I2C_SCL_PIN) == LOW) {
+    return false;
+  }
+
+  // 3) Wenn SDA LOW: versuche, den Slave "auszutakten"
+  if (digitalRead(I2C_SDA_PIN) == LOW) {
+    pinMode(I2C_SCL_PIN, OUTPUT);
+
+    for (int i = 0; i < 9; i++) {
+      digitalWrite(I2C_SCL_PIN, HIGH);
+      delayMicroseconds(5);
+      digitalWrite(I2C_SCL_PIN, LOW);
+      delayMicroseconds(5);
+    }
+
+    // SCL wieder freigeben
+    pinMode(I2C_SCL_PIN, INPUT_PULLUP);
+    delayMicroseconds(5);
+  }
+
+  // 4) STOP condition erzwingen: SDA LOW -> SCL HIGH -> SDA HIGH
+  pinMode(I2C_SDA_PIN, OUTPUT);
+  digitalWrite(I2C_SDA_PIN, LOW);
+  delayMicroseconds(5);
+
+  pinMode(I2C_SCL_PIN, INPUT_PULLUP); // SCL HIGH (über Pullup)
+  delayMicroseconds(5);
+
+  pinMode(I2C_SDA_PIN, INPUT_PULLUP); // SDA HIGH (über Pullup) -> STOP
+  delayMicroseconds(5);
+
+  // 5) I2C wieder initialisieren
+  Wire.begin();
+  Wire.setClock(50000);     // zum Testen erstmal langsam (50 kHz)
+  Wire.setTimeout(50);      // hast du schon, passt
+
+  // Erfolg, wenn beide Linien HIGH sind
+  return (digitalRead(I2C_SDA_PIN) == HIGH) && (digitalRead(I2C_SCL_PIN) == HIGH);
+}
+
 float berechneGeschwindigkeit(long stepsProSekunde) {
   float revsPerSec = (float)stepsProSekunde / STEPS_PER_REV;  // Umdrehungen pro Sekunde
   float revsPerMin = revsPerSec * 60.0;                       // U/min
@@ -451,7 +515,11 @@ void ManMode(){
   pressStart  = 0;  
 
   // --- Magnetfeld -> Durchmesser ---
-  float D = a * log(readMagnet_B_total_filtered()) + b;
+  float B = readMagnet_B_total_filtered();
+  float D = NAN;
+  if (B > 1e-6f && isfinite(B)) {
+    D = a * logf(B) + b;
+  }
 
   // --- Anzeige + Serial alle 200 ms ---
   static unsigned long lastPrintTime = 0;
@@ -510,8 +578,8 @@ void AutoMode() {
       sollDurchmesser += 0.01f * (float)encDelta;
 
       // Limits setzen
-      if (sollDurchmesser < 1.50f) sollDurchmesser = 1.75f;
-      if (sollDurchmesser > 2.20f) sollDurchmesser = 1.75f;
+      if (sollDurchmesser < 1.50f) sollDurchmesser = 1.50f;
+      if (sollDurchmesser > 2.20f) sollDurchmesser = 2.20f;
 
       encDelta = 0;   // WICHTIG: Delta "verbrauchen"
     }
@@ -538,8 +606,8 @@ void AutoMode() {
   // --- 1) Durchmesser messen (mit Schutz gegen log(<=0)) ---
   float B = readMagnet_B_total_filtered();
   float dIst = NAN;
-  if (B > 1e-6f) {
-    dIst = a * logf(B) + b;
+  if (B > 1e-6f && isfinite(B)) {
+  dIst = a * logf(B) + b;
   }
 
   // --- 2) Vorsteuerung berechnen und an Arduino senden (WRITE) ---
@@ -627,7 +695,10 @@ void AutoMode() {
 
 
   // --- 4) Anzeige ---
-  update_Display_Auto(sollDurchmesser, dIst, rampDone);
+  if (millis() - lastDisp >= 150){
+    lastDisp = millis();
+    update_Display_Auto(sollDurchmesser, dIst, rampDone);
+  }
 
 
   // --- 5) Logging (optional, passt super fürs Tuning) ---
@@ -658,7 +729,7 @@ void setup() {
   delay(2000);      // Damit Serial genug Zeit zum starten hat
 
   Wire.begin();    // Sensor auf I2C0 (Pins 4/5)
-  Wire.setClock(100000);  // 100 kHz
+  Wire.setClock(50000);  // 50 kHz
   Wire.setTimeout(50);
 
   if(!display.begin(0x3C)){ while(1); }                                                           //Selbstprüfung
@@ -686,6 +757,7 @@ void setup() {
 
 void loop() {
   static unsigned long lastI2C = 0;
+  static int i2cFailCount = 0;                // Für Bus Restart
   unsigned long now = millis();
 
   if (!regressionDone) {
@@ -721,18 +793,29 @@ void loop() {
 
     bool ok = requestData();
     if (!ok) {
-      Serial.println("requestData() FAIL");
-      // optional: mode NICHT anfassen (machst du eh), aber du siehst es im Log
+      i2cFailCount++;
+      Serial.print("requestData() FAIL #");
+      Serial.println(i2cFailCount);
+
+      if (i2cFailCount >= 3) {
+      Serial.println("I2C stuck -> trying bus recovery...");
+      bool rec = i2c_bus_recover();
+      Serial.println(rec ? "I2C recovery OK" : "I2C recovery FAILED");
+      i2cFailCount = 0;
+      }
     } else {
-      Serial.print("I2C OK: mode=");
-      Serial.print(mode);
-      Serial.print(" running=");
-      Serial.print(isrunning);
-      Serial.print(" speed=");
-      Serial.println(current_rpm);
+    i2cFailCount = 0;
+
+    Serial.print("I2C OK: mode=");
+    Serial.print(mode);
+    Serial.print(" running=");
+    Serial.print(isrunning);
+    Serial.print(" speed=");
+    Serial.println(current_rpm);
     }
   }
 }
+
 
 // --- Logging für Regelung ---
 // ===== cd (welcher Ordner) 
