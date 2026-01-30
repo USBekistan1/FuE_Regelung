@@ -270,7 +270,7 @@ void loop() {
     else {
         if (isAutoMode) {
             targetSpeed = (float)receivedSpeed;
-            encoderPos = receivedSpeed;
+            //encoderPos = receivedSpeed;           --Überschreibt encoderposition im Automode
         } else {
             targetSpeed = (float)encoderPos;
         }
