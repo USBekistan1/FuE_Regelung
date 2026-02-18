@@ -103,6 +103,12 @@ const float REG_KI = 25.0f;
 float integralSum = 0.0f;
 const float INTEGRAL_MAX = 1000.0f;
 
+// ---- Hysterese ----
+const float DB_IN_MM  = 0.06f;  // Regler geht AN, wenn größer
+const float DB_OUT_MM = 0.04f;  // Regler geht AUS, wenn kleiner
+static bool RegActive = false;
+
+
 // ======== EMA-Filter für TLx493D ========
 // Läuft nicht-blockierend, 50 Hz Abtastrate (20 ms Schrittzeit)
 // Glättet die Magnetfeldmessung über X/Y/Z und gibt den Betrag zurück.
@@ -179,7 +185,6 @@ float readMagnet_B_total_filtered() {
 
   return emaLastMagnitude;
 }
-
 
 void resetMagnetFilter() {          //Frische Ema für jeden neuen Stab
   emaInitialized = false;
@@ -676,53 +681,64 @@ void AutoMode() {
   }
 
   // ---- 3) Regelung ----
-  if(rampDone){
-    if (now - lastWrite >= WRITE_PERIOD_MS_REG) {
-      // Delta-Zeit (dt) berechnen, damit das Integral mathematisch korrekt ist (Fehler * Zeit)
-      float dt = (now - lastWrite) / 1000.0f; 
-      lastWrite = now;
+if (rampDone) {
+  if (now - lastWrite >= WRITE_PERIOD_MS_REG) {
 
-      int16_t cmdSteps = 0;
+    float dt = (now - lastWrite) / 1000.0f;
+    lastWrite = now;
 
-      // Sicherheitsabfrage: Regeln wir nur, wenn der Motor läuft und der Sensor OK ist
-      if (isrunning && !isnan(dIst) && isfinite(dIst)) {
-      
-        // A) Vorsteuerung (Feedforward): Die Basis-Geschwindigkeit aus dem Modell
-        int16_t steps_feedforward = berechneStepsAusDurchmesser(sollDurchmesser);
-      
-        // B) I-Anteil berechnen (Feedback)
-        // Fehler berechnen: Ist > Soll (zu dick) -> Fehler positiv -> Wir müssen schneller werden
-        float abweichung = dIst - sollDurchmesser;
-      
-        // Integral bilden: Alter Wert + (Fehler * vergangene Zeit)
+    int16_t cmdSteps = 0;
+
+    // Sicherheitsabfrage: Regeln wir nur, wenn der Motor läuft und der Sensor OK ist
+    if (isrunning && !isnan(dIst) && isfinite(dIst)) {
+
+      // A) Vorsteuerung (Feedforward)
+      int16_t steps_feedforward = berechneStepsAusDurchmesser(sollDurchmesser);
+
+      // B) Fehler berechnen
+      float abweichung = dIst - sollDurchmesser;
+      float errorAbs = fabsf(abweichung);
+
+      // C) Deadband + Hysterese: Feedback nur außerhalb des Bandes aktivieren
+      //    fbActive ist global/static (siehe weiter unten)
+      if (!RegActive && errorAbs >= DB_IN_MM)  RegActive = true;
+      if ( RegActive && errorAbs <= DB_OUT_MM) RegActive = false;
+
+      // D) Integral nur integrieren, wenn Feedback aktiv
+      if (RegActive) {
         integralSum += abweichung * dt;
 
-        // !!! Anti-Windup !!!
-        // Begrenzt den Speicher, damit er nicht "überläuft", wenn der Fehler lange besteht.
+        // Anti-Windup
         if (integralSum > INTEGRAL_MAX) integralSum = INTEGRAL_MAX;
         if (integralSum < -INTEGRAL_MAX) integralSum = -INTEGRAL_MAX;
+      } else {
+        // Feedback AUS: Integral abbauen, damit nix "hängen bleibt"
+        integralSum *= 0.90f;   // alternativ: integralSum = 0.0f;
+        if (fabsf(integralSum) < 1e-3f) integralSum = 0.0f;
+      }
 
-        // Den I-Anteil in Steps umrechnen
-        float steps_correction = integralSum * REG_KI;
+      // E) Korrektur in Steps
+      float steps_correction = integralSum * REG_KI;
 
-        // C) Zusammenführen: Gesamtspeed = Modellwert + Korrekturwert
-        cmdSteps = steps_feedforward + (int16_t)steps_correction;
+      // F) Zusammenführen
+      cmdSteps = steps_feedforward + (int16_t)steps_correction;
 
-        // Grenzwerte des Motors einhalten
-        if (cmdSteps < 0) cmdSteps = 0;
-        if (cmdSteps > 3000) cmdSteps = 3000;
+      // Grenzwerte
+      if (cmdSteps < 0) cmdSteps = 0;
+      if (cmdSteps > 3000) cmdSteps = 3000;
 
-        } else {
-          // WICHTIG: Wenn Motor aus ist, Integral resetten!
-          // Sonst merkt er sich den "Fehler" vom Stillstand und rast beim Starten los.
-          cmdSteps = 0;
-          integralSum = 0.0f;
-        }
-
-      targetSpeed = cmdSteps;
-      sendSpeedToSlave(cmdSteps);
+    } else {
+      // Motor aus oder Sensor ungültig: Integral resetten und Stop
+      cmdSteps = 0;
+      integralSum = 0.0f;
+      RegActive = false;
     }
+
+    targetSpeed = cmdSteps;
+    sendSpeedToSlave(cmdSteps);
   }
+}
+
 
 
   // --- 4) Anzeige ---
