@@ -235,10 +235,11 @@ void loop() {
         if (isAutoMode) {
         // MAN -> AUTO: starte Auto mit dem aktuellen Manual-Sollwert
         receivedSpeed = (int16_t)encoderPos;     // Auto bekommt "aktuellen Manual-Wert"
+        lastEncPosForI2C = encoderPos;           // Damit delta = 0 bei Auto Start
     } else {
         // AUTO -> MAN: starte Manual mit dem aktuellen Auto-Sollwert (oder currentSpeed)
         encoderPos = (long)receivedSpeed;        // Encoder springt auf Auto-Wert
-    // alternativ: encoderPos = (long)currentSpeed;
+        // alternativ: encoderPos = (long)currentSpeed;
     }
     lastAuto = isAutoMode;
     }
@@ -270,7 +271,7 @@ void loop() {
     else {
         if (isAutoMode) {
             targetSpeed = (float)receivedSpeed;
-            encoderPos = receivedSpeed;
+            //encoderPos = receivedSpeed; --> Überschreibt encoderPos bei dSoll Wahl
         } else {
             targetSpeed = (float)encoderPos;
         }
