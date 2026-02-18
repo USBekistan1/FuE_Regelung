@@ -99,7 +99,7 @@ AutoState autoState = AUTO_SETPOINT;
 volatile int16_t encDelta = 0;
 
 // ---- Regelung ----
-const float REG_KI = 50.0f;
+const float REG_KI = 25.0f;
 float integralSum = 0.0f;
 const float INTEGRAL_MAX = 1000.0f;
 
@@ -108,51 +108,78 @@ const float INTEGRAL_MAX = 1000.0f;
 // Glättet die Magnetfeldmessung über X/Y/Z und gibt den Betrag zurück.
 
 float readMagnet_B_total_filtered() {
+  static uint32_t tlvOk = 0;
+  static uint32_t tlvFail = 0;
+  static unsigned long lastStat = 0;
+
   const float TAU_S = 0.20f;
   const float dt = SAMPLE_PERIOD_MS / 1000.0f;
   const float alpha = 1.0f - expf(-dt / TAU_S);
   const unsigned long now = millis();
-   
-  static unsigned long lastReinit = 0;
-  const unsigned long REINIT_PERIOD_MS = 500;               // Frequenz mit der Sensor neugestartet wird
 
+  static unsigned long lastReinit = 0;
+  const unsigned long REINIT_PERIOD_MS = 500;
+
+  static uint16_t failCount = 0;
+
+  // 50 Hz gating
   if (now - emaLastSampleTime < SAMPLE_PERIOD_MS) {
     return emaLastMagnitude;
   }
   emaLastSampleTime = now;
+
   double x, y, z;
-  
- 
-  if (Tlv493dMagnetic3DSensor.getMagneticFieldAndTemperature(&x, &y, &z, nullptr)) {
-    // FALL: Sensor funktioniert
+
+  bool ok = Tlv493dMagnetic3DSensor.getMagneticFieldAndTemperature(&x, &y, &z, nullptr);
+
+  if (ok) {
+    failCount = 0;
+    tlvOk++;
+
     if (!emaInitialized) {
-      emaX = (float)x; emaY = (float)y; emaZ = (float)z;
+      emaX = (float)x;
+      emaY = (float)y;
+      emaZ = (float)z;
       emaInitialized = true;
     } else {
       emaX += alpha * ((float)x - emaX);
       emaY += alpha * ((float)y - emaY);
       emaZ += alpha * ((float)z - emaZ);
     }
-    // Betrag berechnen
+
     emaLastMagnitude = sqrtf(emaX * emaX + emaY * emaY + emaZ * emaZ);
-  } 
-  else {
+  } else {
     emaInitialized = false;
+    failCount++;
+    tlvFail++;
 
     if (now - lastReinit > REINIT_PERIOD_MS) {
       lastReinit = now;
-
-      // Erst Bus-Recovery versuchen, dann Sensor neu starten
       bool rec = i2c_bus_recover();
-      Serial.println(rec ? "I2C rec OK (sensor)" : "I2C rec FAIL (sensor)");
-
+      if (Serial) Serial.println(rec ? "I2C rec OK (sensor)" : "I2C rec FAIL (sensor)");
       Tlv493dMagnetic3DSensor.begin();
     }
 
-    return NAN; 
+    if (failCount >= 10) {
+      emaLastMagnitude = NAN;  // damit du später klar siehst, dass es wirklich tot ist
+    }
+    // sonst: emaLastMagnitude bleibt letzter gültiger Wert
   }
+
+  // 1 Hz Statistik (wichtig: vor dem return!)
+  if (now - lastStat > 1000) {
+    lastStat = now;
+    if (Serial) {
+      Serial.print("TLV ok=");
+      Serial.print(tlvOk);
+      Serial.print(" fail=");
+      Serial.println(tlvFail);
+    }
+  }
+
   return emaLastMagnitude;
 }
+
 
 void resetMagnetFilter() {          //Frische Ema für jeden neuen Stab
   emaInitialized = false;
@@ -321,8 +348,9 @@ void update_Display_Man(float dIst) {
   display.println(dIst);
   display.println(" mm");
 
+  Serial.println("OLED: before display()");
   display.display();
-  //delay(100);                                                                //mehr delay, warum?
+  Serial.println("OLED: after display()");
 }
 
 void update_Display_Auto(float dSoll, float dIst, bool rampDone){
@@ -348,7 +376,9 @@ void update_Display_Auto(float dSoll, float dIst, bool rampDone){
   display.print("AUTO: ");
   display.println(rampDone ? "Regler aktiv" : "Vorsteuerung -> Knopf drücken wenn Durchm. stabil");
 
+  //erial.println("OLED: before display()");
   display.display();
+  //Serial.println("OLED: after display()");
 }
 
 void update_Display_Sollwahl(float dSoll){
@@ -570,12 +600,13 @@ void sendSpeedToSlave(int16_t speedSteps) {
 void AutoMode() {
   unsigned long now = millis();
   static unsigned long lastWrite = 0;
-  const unsigned long WRITE_PERIOD_MS = 20000;
+  const unsigned long WRITE_PERIOD_MS = 200;
+  const unsigned long WRITE_PERIOD_MS_REG = 15000;
 
   // --- 0) Sollwert Einstellen
   if (autoState == AUTO_SETPOINT) {
     if (encDelta != 0) {
-      sollDurchmesser += 0.01f * (float)encDelta;
+      sollDurchmesser += 0.005f * (float)encDelta;              // 0.01mm Schritte
 
       // Limits setzen
       if (sollDurchmesser < 1.50f) sollDurchmesser = 1.50f;
@@ -618,7 +649,7 @@ void AutoMode() {
       int16_t cmdSteps = 0;
 
       // Nur senden, wenn running + gültiger Sensorwert
-      if (isrunning && !isnan(dIst) && isfinite(dIst)) {
+      if (isrunning) {
         cmdSteps = berechneStepsAusDurchmesser(sollDurchmesser);
       } else {
         cmdSteps = 0;
@@ -646,7 +677,7 @@ void AutoMode() {
 
   // ---- 3) Regelung ----
   if(rampDone){
-    if (now - lastWrite >= WRITE_PERIOD_MS) {
+    if (now - lastWrite >= WRITE_PERIOD_MS_REG) {
       // Delta-Zeit (dt) berechnen, damit das Integral mathematisch korrekt ist (Fehler * Zeit)
       float dt = (now - lastWrite) / 1000.0f; 
       lastWrite = now;
@@ -760,6 +791,12 @@ void loop() {
   static int i2cFailCount = 0;                // Für Bus Restart
   unsigned long now = millis();
 
+  static unsigned long hb = 0;                // LED Heartbeat für debug
+  if (millis() - hb > 250) {
+    hb = millis();
+    digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+  }
+
   if (!regressionDone) {
     showMessage("Kalibrieren?\nKurz druecken: Nein\nLang Druecken: Ja", 1);
 
@@ -798,9 +835,9 @@ void loop() {
       Serial.println(i2cFailCount);
 
       if (i2cFailCount >= 3) {
-      Serial.println("I2C stuck -> trying bus recovery...");
+      //Serial.println("I2C stuck -> trying bus recovery...");
       bool rec = i2c_bus_recover();
-      Serial.println(rec ? "I2C recovery OK" : "I2C recovery FAILED");
+      //Serial.println(rec ? "I2C recovery OK" : "I2C recovery FAILED");
       i2cFailCount = 0;
       }
     } else {
