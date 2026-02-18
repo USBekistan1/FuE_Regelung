@@ -271,7 +271,7 @@ void loop() {
     else {
         if (isAutoMode) {
             targetSpeed = (float)receivedSpeed;
-            //encoderPos = receivedSpeed; --> Überschreibt encoderPos bei dSoll Wahl
+            ////encoderPos = receivedSpeed; --> Überschreibt encoderPos bei dSoll Wahl           --Überschreibt encoderposition im Automode
         } else {
             targetSpeed = (float)encoderPos;
         }
