@@ -19,7 +19,7 @@ const int PIN_B = 3;
 volatile float currentSpeed = 0.0;    
 volatile float targetSpeed = 0.0;     
 float accelMan = 400.0;           // Steps/sec²
-float accelAuto = 25.0f;              // ≈ 0,3 m/min pro Sekunde
+float accelAuto = 300.0f;              // ≈ 0,3 m/min pro Sekunde
 
 // Encoder Variablen
 volatile long encoderPos = 60;        
