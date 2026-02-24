@@ -379,7 +379,7 @@ void update_Display_Auto(float dSoll, float dIst, bool rampDone){
   display.println(" m/min");
 
   display.print("AUTO: ");
-  display.println(rampDone ? "Regler aktiv" : "Vorsteuerung -> Knopf drücken wenn Durchm. stabil");
+  display.println(rampDone ? "Regler aktiv" : "Vorsteuerung -> Knopf druecken wenn Durchm. stabil");
 
   //erial.println("OLED: before display()");
   display.display();
@@ -528,9 +528,11 @@ bool i2c_bus_recover() {
 
   // 5) I2C wieder initialisieren
   Wire.begin();
-  Wire.setClock(50000);     // zum Testen erstmal langsam (50 kHz)
-  Wire.setTimeout(50);      // hast du schon, passt
-
+  Wire.setClock(50000);     
+  Wire.setTimeout(50);      
+  display.begin(0x3C);
+  Tlv493dMagnetic3DSensor.begin();  
+  
   // Erfolg, wenn beide Linien HIGH sind
   return (digitalRead(I2C_SDA_PIN) == HIGH) && (digitalRead(I2C_SCL_PIN) == HIGH);
 }
@@ -624,13 +626,24 @@ void AutoMode() {
 
       encDelta = 0;   // WICHTIG: Delta "verbrauchen"
     }
-    // Anzeige: SETPOINT
-    // (baue dir gern "AUTO: Sollwahl" ins Display)
+
     update_Display_Sollwahl(sollDurchmesser);
 
     // Bestätigen per Hold-to-confirm
     if (digitalRead(PIN_CONFIRM) == HIGH) {
       if (pressStart == 0) pressStart = now;
+
+      if (now - pressStart >= 300) {
+        // Warten bis Button wieder losgelassen wird
+        while (digitalRead(PIN_CONFIRM) == HIGH) {
+        delay(1);   // Mini-Delay gegen 100% CPU-Spin
+        }
+
+        pressStart  = 0;
+        integralSum = 0.0f;
+        rampDone    = false;               
+        autoState   = AUTO_FEEDFORWARD;    
+      }
         if (now - pressStart >= 300) {
           pressStart  = 0;
           integralSum = 0.0f;
@@ -645,7 +658,7 @@ void AutoMode() {
 
     } else {
       pressStart = 0;
-    }
+    }     
 
     return; // im SETPOINT-State nichts senden/regeln
   }
