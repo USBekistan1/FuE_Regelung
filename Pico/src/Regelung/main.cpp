@@ -604,9 +604,14 @@ void sendSpeedToSlave(int16_t speedSteps) {
 
 void AutoMode() {
   unsigned long now = millis();
-  static unsigned long lastWrite = 0;
+  //static unsigned long lastWrite = 0;
   const unsigned long WRITE_PERIOD_MS = 200;
-  const unsigned long WRITE_PERIOD_MS_REG = 15000;
+  const unsigned long REG_Period = 10000;
+  // --- Hold für Stellwert, wenn Regler "aus" ---
+  static int16_t holdCmdSteps = 0;
+  static bool    holdValid    = false;
+  static unsigned long lastWriteFF  = 0;
+  static unsigned long lastWriteReg = 0;
 
   // --- 0) Sollwert Einstellen
   if (autoState == AUTO_SETPOINT) {
@@ -631,7 +636,13 @@ void AutoMode() {
           integralSum = 0.0f;
           rampDone    = false;                 // Regler noch AUS
           autoState   = AUTO_FEEDFORWARD;      // weiter: Vorsteuerung-only
+          RegActive = false;
+          holdValid = false;
+          holdCmdSteps = 0;
+          lastWriteFF = now;
+          lastWriteReg = now;   // dt sauber
         }
+
     } else {
       pressStart = 0;
     }
@@ -648,8 +659,8 @@ void AutoMode() {
 
   // --- 2) Vorsteuerung berechnen und an Arduino senden (WRITE) ---
   if (!rampDone){
-    if (now - lastWrite >= WRITE_PERIOD_MS) {
-      lastWrite = now;
+    if (now - lastWriteFF >= WRITE_PERIOD_MS) {
+      lastWriteFF = now;
 
       int16_t cmdSteps = 0;
 
@@ -672,6 +683,8 @@ void AutoMode() {
           rampDone   = true;
           integralSum = 0.0f;                               // sauberer Übergang
           pressStart  = 0;                                  // reset (optional)
+          holdValid    = false;
+          holdCmdSteps = 0;
         }
       } else {
         pressStart = 0;                                       // losgelassen → zurücksetzen
@@ -681,47 +694,61 @@ void AutoMode() {
   }
 
   // ---- 3) Regelung ----
-if (rampDone) {
-  if (now - lastWrite >= WRITE_PERIOD_MS_REG) {
+  if (rampDone) {
+    if (now - lastWriteReg >= REG_Period) {
 
-    float dt = (now - lastWrite) / 1000.0f;
-    lastWrite = now;
+      float dt = (now - lastWriteReg) / 1000.0f;
+      lastWriteReg = now;
 
-    int16_t cmdSteps = 0;
+      int16_t cmdSteps = 0;
 
     // Sicherheitsabfrage: Regeln wir nur, wenn der Motor läuft und der Sensor OK ist
+
     if (isrunning && !isnan(dIst) && isfinite(dIst)) {
 
       // A) Vorsteuerung (Feedforward)
       int16_t steps_feedforward = berechneStepsAusDurchmesser(sollDurchmesser);
 
-      // B) Fehler berechnen
+      // B) Fehler
       float abweichung = dIst - sollDurchmesser;
-      float errorAbs = fabsf(abweichung);
+      float errorAbs   = fabsf(abweichung);
 
-      // C) Deadband + Hysterese: Feedback nur außerhalb des Bandes aktivieren
-      //    fbActive ist global/static (siehe weiter unten)
+      // C) Deadband + Hysterese
       if (!RegActive && errorAbs >= DB_IN_MM)  RegActive = true;
       if ( RegActive && errorAbs <= DB_OUT_MM) RegActive = false;
 
-      // D) Integral nur integrieren, wenn Feedback aktiv
+      // D) Stellwert bilden
       if (RegActive) {
+        // Integral nur wenn aktiv
         integralSum += abweichung * dt;
 
         // Anti-Windup
-        if (integralSum > INTEGRAL_MAX) integralSum = INTEGRAL_MAX;
+        if (integralSum >  INTEGRAL_MAX) integralSum =  INTEGRAL_MAX;
         if (integralSum < -INTEGRAL_MAX) integralSum = -INTEGRAL_MAX;
+
+        float steps_correction = integralSum * REG_KI;
+
+        int32_t cmd = (int32_t)steps_feedforward + (int32_t)lroundf(steps_correction);
+        if (cmd < 0) cmd = 0;
+        if (cmd > 3000) cmd = 3000;
+
+        cmdSteps = (int16_t)cmd;
+
+        // HOLD updaten
+        holdCmdSteps = cmdSteps;
+        holdValid    = true;
+
       } else {
-        // Feedback AUS: Integral abbauen, damit nix "hängen bleibt"
-        integralSum *= 0.90f;   // alternativ: integralSum = 0.0f;
-        if (fabsf(integralSum) < 1e-3f) integralSum = 0.0f;
+        // Regler AUS -> letzten Stellwert halten
+        if (holdValid) {
+          cmdSteps = holdCmdSteps;
+        } else {
+          // falls noch kein Hold existiert (z.B. direkt nach rampDone)
+          cmdSteps = steps_feedforward;
+          holdCmdSteps = cmdSteps;
+          holdValid = true;
+        }
       }
-
-      // E) Korrektur in Steps
-      float steps_correction = integralSum * REG_KI;
-
-      // F) Zusammenführen
-      cmdSteps = steps_feedforward + (int16_t)steps_correction;
 
       // Grenzwerte
       if (cmdSteps < 0) cmdSteps = 0;
@@ -732,21 +759,20 @@ if (rampDone) {
       cmdSteps = 0;
       integralSum = 0.0f;
       RegActive = false;
+      holdValid    = false;
+      holdCmdSteps = 0;
     }
 
     targetSpeed = cmdSteps;
     sendSpeedToSlave(cmdSteps);
+    }
   }
-}
-
-
 
   // --- 4) Anzeige ---
   if (millis() - lastDisp >= 150){
     lastDisp = millis();
     update_Display_Auto(sollDurchmesser, dIst, rampDone);
   }
-
 
   // --- 5) Logging (optional, passt super fürs Tuning) ---
   static unsigned long lastPrint = 0;
