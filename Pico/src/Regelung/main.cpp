@@ -99,7 +99,7 @@ AutoState autoState = AUTO_SETPOINT;
 volatile int16_t encDelta = 0;
 
 // ---- Regelung ----
-const float REG_KI = 25.0f;
+const float REG_KI = 8.0f;
 float integralSum = 0.0f;
 const float INTEGRAL_MAX = 1000.0f;
 
