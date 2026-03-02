@@ -159,12 +159,12 @@ float readMagnet_B_total_filtered() {
     failCount++;
     tlvFail++;
 
-    if (now - lastReinit > REINIT_PERIOD_MS) {
+    /*if (now - lastReinit > REINIT_PERIOD_MS) {
       lastReinit = now;
       bool rec = i2c_bus_recover();
       if (Serial) Serial.println(rec ? "I2C rec OK (sensor)" : "I2C rec FAIL (sensor)");
       Tlv493dMagnetic3DSensor.begin();
-    }
+    }*/
 
     if (failCount >= 10) {
       emaLastMagnitude = NAN;  // damit du später klar siehst, dass es wirklich tot ist
@@ -891,7 +891,7 @@ void loop() {
 
       if (i2cFailCount >= 3) {
       //Serial.println("I2C stuck -> trying bus recovery...");
-      bool rec = i2c_bus_recover();
+      //bool rec = i2c_bus_recover();
       //Serial.println(rec ? "I2C recovery OK" : "I2C recovery FAILED");
       i2cFailCount = 0;
       }
