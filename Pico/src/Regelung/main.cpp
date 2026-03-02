@@ -28,6 +28,7 @@ bool loadCalibrationFromFlash();
 void ManMode();
 void AutoMode();
 bool i2c_bus_recover();
+bool handleI2CRecoverHold();
 
 //Regelung
 int16_t berechneStepsAusDurchmesser(float d_soll);
@@ -87,6 +88,7 @@ volatile bool isrunning = true;                                           // war
 // --- I2C Bus Recovery (Pico Arduino) ---
 static const int I2C_SDA_PIN = 4;
 static const int I2C_SCL_PIN = 5;
+volatile bool blockRegStartUntilNewPress = false;               //Kein Automatischer Regelstart nach Recovery
 
 // ---- Vorsteuerung ----
 const float CONST_C = 5.939;       // Prozesskonstante
@@ -123,8 +125,8 @@ float readMagnet_B_total_filtered() {
   const float alpha = 1.0f - expf(-dt / TAU_S);
   const unsigned long now = millis();
 
-  static unsigned long lastReinit = 0;
-  const unsigned long REINIT_PERIOD_MS = 500;
+  //static unsigned long lastReinit = 0;
+  //const unsigned long REINIT_PERIOD_MS = 500;
 
   static uint16_t failCount = 0;
 
@@ -191,6 +193,108 @@ void resetMagnetFilter() {          //Frische Ema für jeden neuen Stab
   emaX = emaY = emaZ = 0.0f;
   emaLastMagnitude = 0.0f;
   emaLastSampleTime = 0;
+}
+
+
+bool i2c_bus_recover() {
+  // 1) I2C "stoppen" – je nach Core gibt's kein Wire.end()
+  // Wir machen stattdessen GPIO-Recovery direkt.
+
+  // 2) Pins als GPIO open-drain-like: INPUT_PULLUP (High über Pullup)
+  pinMode(I2C_SDA_PIN, INPUT_PULLUP);
+  pinMode(I2C_SCL_PIN, INPUT_PULLUP);
+  delayMicroseconds(5);
+
+  // Wenn SCL LOW ist, hält jemand den Clock low -> schwerer Fall (z.B. Slave kaputt)
+  if (digitalRead(I2C_SCL_PIN) == LOW) {
+    return false;
+  }
+
+  // 3) Wenn SDA LOW: versuche, den Slave "auszutakten"
+  if (digitalRead(I2C_SDA_PIN) == LOW) {
+    pinMode(I2C_SCL_PIN, OUTPUT);
+
+    for (int i = 0; i < 9; i++) {
+      digitalWrite(I2C_SCL_PIN, HIGH);
+      delayMicroseconds(5);
+      digitalWrite(I2C_SCL_PIN, LOW);
+      delayMicroseconds(5);
+    }
+
+    // SCL wieder freigeben
+    pinMode(I2C_SCL_PIN, INPUT_PULLUP);
+    delayMicroseconds(5);
+  }
+
+  // 4) STOP condition erzwingen: SDA LOW -> SCL HIGH -> SDA HIGH
+  pinMode(I2C_SDA_PIN, OUTPUT);
+  digitalWrite(I2C_SDA_PIN, LOW);
+  delayMicroseconds(5);
+
+  pinMode(I2C_SCL_PIN, INPUT_PULLUP); // SCL HIGH (über Pullup)
+  delayMicroseconds(5);
+
+  pinMode(I2C_SDA_PIN, INPUT_PULLUP); // SDA HIGH (über Pullup) -> STOP
+  delayMicroseconds(5);
+
+  // 5) I2C wieder initialisieren
+  Wire.begin();
+  Wire.setClock(50000);     
+  Wire.setTimeout(50);      
+  display.begin(0x3C);
+  Tlv493dMagnetic3DSensor.begin();  
+  
+  // Erfolg, wenn beide Linien HIGH sind
+  return (digitalRead(I2C_SDA_PIN) == HIGH) && (digitalRead(I2C_SCL_PIN) == HIGH);
+}
+
+bool handleI2CRecoverHold() {
+  const unsigned long HOLD_MS = 5000;
+
+  static unsigned long tStart = 0;
+  static bool armed = true;
+
+  unsigned long now = millis();
+  bool btn = (digitalRead(PIN_CONFIRM) == HIGH);
+
+  if (!btn) {
+    tStart = 0;
+    armed = true;
+    return false;
+  }
+
+  if (tStart == 0) tStart = now;
+
+  if (armed && (now - tStart >= HOLD_MS)) {
+    armed = false;
+
+    showMessage("I2C recover...\nBitte warten", 1);
+    if (Serial) Serial.println("Manual I2C recover (5s hold)");
+
+    bool rec = i2c_bus_recover();
+    blockRegStartUntilNewPress = true;
+
+    if (rec) {
+      showMessage("I2C recover: OK", 1);
+      if (Serial) Serial.println("I2C recover OK");
+    } else {
+      showError("I2C recover FAIL");
+      if (Serial) Serial.println("I2C recover FAIL");
+    }
+
+    resetMagnetFilter();
+
+    // Muss loslassen, sonst retrigger/Confirm-chaos
+    while (digitalRead(PIN_CONFIRM) == HIGH) delay(5);
+
+    // States zurücksetzen für nächsten Hold
+    tStart = 0;
+    armed = true;
+
+    return true; // wurde getriggert
+  }
+
+  return false;
 }
 
 void modusKalibrierung() {
@@ -485,57 +589,7 @@ bool requestData() {
     return true;
 }
 
-bool i2c_bus_recover() {
-  // 1) I2C "stoppen" – je nach Core gibt's kein Wire.end()
-  // Wir machen stattdessen GPIO-Recovery direkt.
 
-  // 2) Pins als GPIO open-drain-like: INPUT_PULLUP (High über Pullup)
-  pinMode(I2C_SDA_PIN, INPUT_PULLUP);
-  pinMode(I2C_SCL_PIN, INPUT_PULLUP);
-  delayMicroseconds(5);
-
-  // Wenn SCL LOW ist, hält jemand den Clock low -> schwerer Fall (z.B. Slave kaputt)
-  if (digitalRead(I2C_SCL_PIN) == LOW) {
-    return false;
-  }
-
-  // 3) Wenn SDA LOW: versuche, den Slave "auszutakten"
-  if (digitalRead(I2C_SDA_PIN) == LOW) {
-    pinMode(I2C_SCL_PIN, OUTPUT);
-
-    for (int i = 0; i < 9; i++) {
-      digitalWrite(I2C_SCL_PIN, HIGH);
-      delayMicroseconds(5);
-      digitalWrite(I2C_SCL_PIN, LOW);
-      delayMicroseconds(5);
-    }
-
-    // SCL wieder freigeben
-    pinMode(I2C_SCL_PIN, INPUT_PULLUP);
-    delayMicroseconds(5);
-  }
-
-  // 4) STOP condition erzwingen: SDA LOW -> SCL HIGH -> SDA HIGH
-  pinMode(I2C_SDA_PIN, OUTPUT);
-  digitalWrite(I2C_SDA_PIN, LOW);
-  delayMicroseconds(5);
-
-  pinMode(I2C_SCL_PIN, INPUT_PULLUP); // SCL HIGH (über Pullup)
-  delayMicroseconds(5);
-
-  pinMode(I2C_SDA_PIN, INPUT_PULLUP); // SDA HIGH (über Pullup) -> STOP
-  delayMicroseconds(5);
-
-  // 5) I2C wieder initialisieren
-  Wire.begin();
-  Wire.setClock(50000);     
-  Wire.setTimeout(50);      
-  display.begin(0x3C);
-  Tlv493dMagnetic3DSensor.begin();  
-  
-  // Erfolg, wenn beide Linien HIGH sind
-  return (digitalRead(I2C_SDA_PIN) == HIGH) && (digitalRead(I2C_SCL_PIN) == HIGH);
-}
 
 float berechneGeschwindigkeit(long stepsProSekunde) {
   float revsPerSec = (float)stepsProSekunde / STEPS_PER_REV;  // Umdrehungen pro Sekunde
@@ -545,6 +599,7 @@ float berechneGeschwindigkeit(long stepsProSekunde) {
 }
 
 void ManMode(){
+  if (handleI2CRecoverHold()) return;       //Bus Recover Abfrage
   unsigned long now = millis();
   autoState   = AUTO_SETPOINT;
   rampDone    = false;
@@ -605,6 +660,10 @@ void sendSpeedToSlave(int16_t speedSteps) {
 }
 
 void AutoMode() {
+  if (autoState != AUTO_SETPOINT) {           //Bus Recover Abfrage nuraußerhalb vom SetPoint
+    if (handleI2CRecoverHold()) return;
+  }
+
   unsigned long now = millis();
   //static unsigned long lastWrite = 0;
   const unsigned long WRITE_PERIOD_MS = 200;
@@ -689,22 +748,46 @@ void AutoMode() {
     }
   }
 
-  if (!rampDone) {
-    if (digitalRead(PIN_CONFIRM) == HIGH) {
-      if (pressStart == 0) pressStart = millis();          // Startzeit merken
-        if (millis() - pressStart >= 300) {
-          rampDone   = true;
-          integralSum = 0.0f;                               // sauberer Übergang
-          pressStart  = 0;                                  // reset (optional)
-          holdValid    = false;
-          holdCmdSteps = 0;
-        }
-      } else {
-        pressStart = 0;                                       // losgelassen → zurücksetzen
+// --- RampDone erst bei LOSLASSEN nach >=300ms Hold ---
+// --- ABER: nach Recover erst "neutral" werden und neuen Druck verlangen ---
+if (!rampDone) {
+  static bool rampArm = false;
+
+  bool btn = (digitalRead(PIN_CONFIRM) == HIGH);
+
+  // 0) Sperre nach Recover: erst einmal LOW gesehen -> dann freigeben,
+  // und erst der NÄCHSTE Press darf wieder armen.
+  if (blockRegStartUntilNewPress) {
+    // solange Button noch HIGH ist: nix tun
+    if (!btn) {
+      // Button ist LOW -> System wieder "neutral"
+      blockRegStartUntilNewPress = false;
+      pressStart = 0;
+      rampArm = false;
+    }
+    // egal was: in diesem Zustand keine Arm/Confirm-Logik
+  } 
+  else {
+    // Normaler Ablauf
+    if (btn) {
+      if (pressStart == 0) pressStart = now;
+      if (!rampArm && (now - pressStart >= 300)) {
+        rampArm = true;  // wartet auf Release
       }
-  } else {
-    pressStart = 0;                                           // wenn schon aktiv, Timer sauber halten
+    } else {
+      if (rampArm) {
+        rampDone     = true;
+        integralSum  = 0.0f;
+        holdValid    = false;
+        holdCmdSteps = 0;
+      }
+      pressStart = 0;
+      rampArm = false;
+    }
   }
+} else {
+  pressStart = 0;
+}
 
   // ---- 3) Regelung ----
   if (rampDone) {
@@ -843,7 +926,7 @@ void setup() {
 
 void loop() {
   static unsigned long lastI2C = 0;
-  static int i2cFailCount = 0;                // Für Bus Restart
+  //static int i2cFailCount = 0;                // Für Bus Restart
   unsigned long now = millis();
 
   static unsigned long hb = 0;                // LED Heartbeat für debug
@@ -882,21 +965,21 @@ void loop() {
      // Zentraler I2C-Read: aktualisiert current_rpm/isrunning/mode
   if (now - lastI2C >= 200) {
     lastI2C = now;
-
-    bool ok = requestData();
+    requestData();
+    /*bool ok = requestData();
     if (!ok) {
       i2cFailCount++;
       Serial.print("requestData() FAIL #");
       Serial.println(i2cFailCount);
 
       if (i2cFailCount >= 3) {
-      //Serial.println("I2C stuck -> trying bus recovery...");
-      //bool rec = i2c_bus_recover();
-      //Serial.println(rec ? "I2C recovery OK" : "I2C recovery FAILED");
+      Serial.println("I2C stuck -> trying bus recovery...");
+      bool rec = i2c_bus_recover();
+      Serial.println(rec ? "I2C recovery OK" : "I2C recovery FAILED");
       i2cFailCount = 0;
       }
     } else {
-    i2cFailCount = 0;
+    i2cFailCount = 0;*/
 
     Serial.print("I2C OK: mode=");
     Serial.print(mode);
@@ -904,10 +987,9 @@ void loop() {
     Serial.print(isrunning);
     Serial.print(" speed=");
     Serial.println(current_rpm);
-    }
+    //}
   }
 }
-
 
 // --- Logging für Regelung ---
 // ===== cd (welcher Ordner) 
