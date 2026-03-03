@@ -11,18 +11,18 @@
 
 // ---------- Konfiguration ----------
 
-#define PIN_CONFIRM 18            // Pin für den Bestätigungs-Knopf
+#define PIN_CONFIRM_BUTTON 18            // Pin für den Bestätigungs-Knopf
 
-#define NUM_CAL_SAMPLES 5
-const float calDiameters[NUM_CAL_SAMPLES] = {1.6f, 1.7f, 1.75f, 1.8f, 1.9f};
+#define CAL_SAMPLE_COUNT 5
+const float calDiameters[CAL_SAMPLE_COUNT] = {1.6f, 1.7f, 1.75f, 1.8f, 1.9f};
 #define SAMPLE_COUNT 100                                          // 100 Samples pro Messung
 #define TRIM_N ((int)(SAMPLE_COUNT * 0.1))                        // !0% der Messwerte getrimmt
 
 // ---------- Globale Variablen für Kalibrierung ----------
 
-float F_vals[NUM_CAL_SAMPLES];    // Sensorwerte (B-Betrag)
-float D_vals[NUM_CAL_SAMPLES];    // Referenzdurchmesser
-float a = -1.0f, b = 0.0f;        // Koeffizienten der Kalibrierungsfunktion
+float F_vals[CAL_SAMPLE_COUNT];    // Sensorwerte (B-Betrag)
+float D_vals[CAL_SAMPLE_COUNT];    // Referenzdurchmesser
+float calA = -1.0f, calB = 0.0f;        // Koeffizienten der Kalibrierungsfunktion
 bool regressionDone = false;
 
 
@@ -32,7 +32,7 @@ Adafruit_SH1106G display(128, 64, &Wire);
 using namespace ifx::tlx493d;
 TLx493D_A1B6 Tlv493dMagnetic3DSensor(Wire, TLx493D_IIC_ADDR_A0_e);
 
-float readMagnet_B_total_filtered() {                                                       
+float ReadSensorEMA() {                                                       
     const int sampleCount = SAMPLE_COUNT;                                                   // sample Count im Moment 100
     double valuesX[sampleCount], valuesY[sampleCount], valuesZ[sampleCount];                // Arrays für x,y,z Achse
     unsigned long start = millis();
@@ -133,11 +133,11 @@ void showCalibrationParams(float a, float b) {
 
 // ---------- Regression ----------
 
-void berechneLogFunktion() {
+void CalculateLogCalibrationFit() {
   float sumLnB = 0.0f, sumD = 0.0f, sumLnB2 = 0.0f, sumLnB_D = 0.0f;
   int nEff = 0;
 
-  for (int i = 0; i < NUM_CAL_SAMPLES; i++) {
+  for (int i = 0; i < CAL_SAMPLE_COUNT; i++) {
     if (F_vals[i] <= 0) continue;
     float lnB = log(F_vals[i]);
     float D = D_vals[i];
@@ -151,12 +151,12 @@ void berechneLogFunktion() {
 
   float denom = nEff * sumLnB2 - sumLnB * sumLnB;
   if (denom != 0 && nEff > 0) {
-    a = (nEff * sumLnB_D - sumLnB * sumD) / denom;
-    b = (sumD - a * sumLnB) / nEff;
+    calA = (nEff * sumLnB_D - sumLnB * sumD) / denom;
+    calB = (sumD - calA * sumLnB) / nEff;
     Serial.print("Kalibrierung fertig. a = ");
-    Serial.print(a, 6);
+    Serial.print(calA, 6);
     Serial.print(" , b = ");
-    Serial.println(b, 6);
+    Serial.println(calB, 6);
   } else {
     showError("Regression fehlgeschlagen");
   }
@@ -164,8 +164,8 @@ void berechneLogFunktion() {
 
 // ---------- Kalibrierablauf ----------
 
-void modusKalibrierung() {
-    for (int sampleIndex = 0; sampleIndex < NUM_CAL_SAMPLES; sampleIndex++) {                     //Schleife über Anzahl Kalibrierungspunkte
+void RunCalibration() {
+    for (int sampleIndex = 0; sampleIndex < CAL_SAMPLE_COUNT; sampleIndex++) {                     //Schleife über Anzahl Kalibrierungspunkte
         float d_real = calDiameters[sampleIndex];
 
         // 1. Anzeige des aktuellen Prüfstabs
@@ -175,15 +175,15 @@ void modusKalibrierung() {
         showMessage(buf);
 
         // 2. Auf Knopfdruck warten
-        while (digitalRead(PIN_CONFIRM) == HIGH) {
+        while (digitalRead(PIN_CONFIRM_BUTTON) == HIGH) {
             delay(50);  // Entprellen
         }
-        while (digitalRead(PIN_CONFIRM) == LOW) {
+        while (digitalRead(PIN_CONFIRM_BUTTON) == LOW) {
             delay(50);
         }
 
         // 3. Messung
-        float B = readMagnet_B_total_filtered();
+        float B = ReadSensorEMA();
         if (B <= 0) {
             showError("Ungueltiger Sensorwert");
             return;  // Kalibrierung abbrechen wenn B nicht größer 1
@@ -195,7 +195,7 @@ void modusKalibrierung() {
     }
 
     // 5. Regression durchführen
-    berechneLogFunktion();
+    CalculateLogCalibrationFit();
     regressionDone = true;
 
     // 6. Erfolgsmeldung
@@ -208,7 +208,7 @@ void modusKalibrierung() {
 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(PIN_CONFIRM, INPUT_PULLDOWN);           // Knopf and GP18 und 3V3 (nicht ground)
+  pinMode(PIN_CONFIRM_BUTTON, INPUT_PULLDOWN);           // Knopf and GP18 und 3V3 (nicht ground)
 
   Serial.begin(115200);
   delay(2000); // Serial hochkommen lassen
@@ -242,17 +242,17 @@ void loop() {
   static bool done = false;
 
   if (!done) {
-    modusKalibrierung();   // Einmal komplette Kalibrierung durchführen
+    RunCalibration();   // Einmal komplette Kalibrierung durchführen
     done = true;
 
     Serial.println("---- Ergebnis ----");
     Serial.print("a = ");
-    Serial.println(a, 6);
+    Serial.println(calA, 6);
     Serial.print("b = ");
-    Serial.println(b, 6);
+    Serial.println(calB, 6);
     Serial.println("------------------");
 
-    showCalibrationParams(a, b);
+    showCalibrationParams(calA, calB);
   }
 
   // Optisches Lebenszeichen: LED blinkt langsam

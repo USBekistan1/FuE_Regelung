@@ -17,13 +17,13 @@
 #include <algorithm>
 
 // ---- Funktionsdeklarierungen ----
-float berechneGeschwindigkeit(long stepsProSekunde);
+float CalculateMetersPerMin(long stepsProSekunde);
 float berechneTotzeit(long stepsProSekunde);
 
-float readMagnet_B_total_filtered();    
+float ReadSensorEMA();    
 
-void berechneLogFunktion();
-float B_to_D(float B);
+void CalculateLogCalibrationFit();
+float MagToDiameter(float B);
 
 float volumeFeedForward(float dSet, float dMeas, float rpmCurrent);
 
@@ -35,14 +35,14 @@ void showMessage(const char* msg);
 void sendData(int16_t val);
 void requestData();
 
-void modusKalibrierung();
+void RunCalibration();
 void modusPWM();
 void modusRegelbetrieb();
 
 
-#define PIN_CONFIRM 18                                            // Pin für den Bestätigungs-Knopf
+#define PIN_CONFIRM_BUTTON 18                                            // Pin für den Bestätigungs-Knopf
 
-#define NUM_CAL_SAMPLES 5
+#define CAL_SAMPLE_COUNT 5
 #define SAMPLE_COUNT 100                                          // 100 Samples pro Messung
 #define TRIM_N ((int)(SAMPLE_COUNT * 0.1))                        // !0% der Messwerte getrimmt
 #define RPM_MAX 3000.0f                                           // MaxSpeed Motor
@@ -91,16 +91,16 @@ using namespace ifx::tlx493d;
 TLx493D_A1B6 Tlv493dMagnetic3DSensor(Wire, TLx493D_IIC_ADDR_A0_e);        // Selber Bus (Sensor & Display)
 
 // -------- Kalibrierung ----------
-float F_vals[NUM_CAL_SAMPLES];                                            // Rohdaten des Sensors
-float D_vals[NUM_CAL_SAMPLES];                                            // Referenzdurchmesser
+float F_vals[CAL_SAMPLE_COUNT];                                            // Rohdaten des Sensors
+float D_vals[CAL_SAMPLE_COUNT];                                            // Referenzdurchmesser
 bool regressionDone = true;                                               // Kalibrierung schon durchgeführt?
-float a = -1.07f, b = 5.67f;                                              // Koeffizienten der Kalibrierungsgeraden
+float calA = -1.07f, calB = 5.67f;                                              // Koeffizienten der Kalibrierungsgeraden
  
 // -------- I2C ----------
-volatile int16_t targetSpeed = 0;                                         // Zielgeschwindigkeit, 2 Byte
-volatile int16_t current_rpm = 0;                                         // Ist-Geschwindigkeit
-volatile bool mode = false;                                               // Default Regelbetrieb
-volatile bool isrunning = true;                                           // warum volatile? Keine ISR oder? Juckt wahrscheinlich nicht
+volatile int16_t targetStepsPerS = 0;                                         // Zielgeschwindigkeit, 2 Byte
+volatile int16_t CurrentStepsPerS = 0;                                         // Ist-Geschwindigkeit
+volatile bool isAutoMode = false;                                               // Default Regelbetrieb
+volatile bool isMotorRunning = true;                                           // warum volatile? Keine ISR oder? Juckt wahrscheinlich nicht
 
 
 // Weitere Variablen
@@ -111,7 +111,7 @@ const int STEPS_PER_REV = 800;                  // Schritte pro Umdrehung
 unsigned long regelPauseBis = 0;                // Regelung greift nur periodisch wegen langsamer Änderung -> keine Schwingung
 
 // Funktion: Umfangsgeschwindigkeit berechnen (m/min)
-float berechneGeschwindigkeit(long stepsProSekunde) {
+float CalculateMetersPerMin(long stepsProSekunde) {
   float revsPerSec = (float)stepsProSekunde / STEPS_PER_REV;  // Umdrehungen pro Sekunde
   float revsPerMin = revsPerSec * 60.0;                       // U/min
   float v_mPerMin = CIRCUMFERENCE * revsPerMin;               // m/min
@@ -120,7 +120,7 @@ float berechneGeschwindigkeit(long stepsProSekunde) {
 
 // Funktion: Totzeit berechnen (s): Messänderung zu Abzugsgeschwindigkeitsänderung
 float berechneTotzeit(long stepsProSekunde) {
-  float v_mPerMin = berechneGeschwindigkeit(stepsProSekunde);
+  float v_mPerMin = CalculateMetersPerMin(stepsProSekunde);
   float v_mPerSec = v_mPerMin / 60.0;                         // m/s
   if (v_mPerSec <= 0) return -1;                              // Schutz vor Division durch 0
   float t = TOTSTRECKE / v_mPerSec;                           // s
@@ -131,7 +131,7 @@ float berechneTotzeit(long stepsProSekunde) {
 // Läuft nicht-blockierend, 50 Hz Abtastrate (20 ms Schrittzeit)
 // Glättet die Magnetfeldmessung über X/Y/Z und gibt den Betrag zurück.
 
-float readMagnet_B_total_filtered() {
+float ReadSensorEMA() {
   static unsigned long lastSampleTime = 0;                // letzter Messzeitpunkt
   static bool initialized = false;                        // erster Durchlauf?
   static float emaX = 0.0f, emaY = 0.0f, emaZ = 0.0f;     // EMA-Zwischenspeicher
@@ -171,10 +171,10 @@ float readMagnet_B_total_filtered() {
 
 
 //--- Parameterberechnung für LogFunk bei Kalibrierung (funktioniert); Regression
-void berechneLogFunktion(){
+void CalculateLogCalibrationFit(){
   float sumLnB=0,sumD=0,sumLnB2=0,sumLnB_D=0;
   int nEff=0;
-  for(int i=0;i<NUM_CAL_SAMPLES;i++){
+  for(int i=0;i<CAL_SAMPLE_COUNT;i++){
     if(F_vals[i]<=0) continue;
     float lnB=log(F_vals[i]);
     float D=D_vals[i];
@@ -183,16 +183,16 @@ void berechneLogFunktion(){
   }
   float denom = nEff*sumLnB2 - sumLnB*sumLnB;
   if(denom!=0){
-    a=(nEff*sumLnB_D - sumLnB*sumD)/denom;
-    b=(sumD - a*sumLnB)/nEff;
+    calA=(nEff*sumLnB_D - sumLnB*sumD)/denom;
+    calB=(sumD - calA*sumLnB)/nEff;
     Serial.print("a= ");
-    Serial.print(a);
+    Serial.print(calA);
     Serial.print(" b= ");
-    Serial.println(b);
+    Serial.println(calB);
   }
 }
 
-float B_to_D(float B){ return a*log(B)+b; }                                   //Kalibrierte Umrechnung
+float MagToDiameter(float B){ return calA*log(B)+calB; }                                   //Kalibrierte Umrechnung
 
 
 //--- greift in Automatikmodus; 
@@ -216,7 +216,7 @@ void update_Display(float dIst) {
   display.setTextSize(1.95);
   display.setTextColor(SH110X_WHITE);
 
-  float speed_m_per_min = berechneGeschwindigkeit(current_rpm);  
+  float speed_m_per_min = CalculateMetersPerMin(CurrentStepsPerS);  
   display.setCursor(0, 0);
   display.print("Speed: ");
   display.setCursor(0, 12);
@@ -229,7 +229,7 @@ void update_Display(float dIst) {
   display.println(" mm");
 
 
-  if (!isrunning) {
+  if (!isMotorRunning) {
     display.clearDisplay();
     display.setCursor(0, 0);
     display.setTextSize(2);
@@ -318,9 +318,9 @@ void requestData() {
     bool modeVal = Wire.read();
 
     //Globale Variablen aktualisieren
-    current_rpm = speed;
-    isrunning = running;
-    mode = modeVal;
+    CurrentStepsPerS = speed;
+    isMotorRunning = running;
+    isAutoMode = modeVal;
     
     //debug ausgabe; Auch hier, Serial bei Master vermutlich ok, aber Recherche
     Serial.print("Master <- Slave: Speed=");
@@ -361,17 +361,17 @@ void setup() {
 void loop() {
   requestData();                                      //Abfrage von Modus, Messdaten,...
   if (!regressionDone) {                              //Kalibrierungsabfrage
-    modusKalibrierung();
+    RunCalibration();
   } else {
-      if (mode) modusRegelbetrieb();                  //Automatik
+      if (isAutoMode) modusRegelbetrieb();                  //Automatik
       else      modusPWM();                           //Manuell
     }
 }
 
 
 // -------- Modus-Funktionen ----------
-void modusKalibrierung() {
-    for (int sampleIndex = 0; sampleIndex < NUM_CAL_SAMPLES; sampleIndex++) {                     //Schleife über Anzahl Kalibrierungspunkte
+void RunCalibration() {
+    for (int sampleIndex = 0; sampleIndex < CAL_SAMPLE_COUNT; sampleIndex++) {                     //Schleife über Anzahl Kalibrierungspunkte
         float d_real = calDiameters[sampleIndex];
 
         // 1. Anzeige des aktuellen Prüfstabs
@@ -381,15 +381,15 @@ void modusKalibrierung() {
         showMessage(buf);
 
         // 2. Auf Knopfdruck warten
-        while (digitalRead(PIN_CONFIRM) == HIGH) {
+        while (digitalRead(PIN_CONFIRM_BUTTON) == HIGH) {
             delay(50);  // Entprellen
         }
-        while (digitalRead(PIN_CONFIRM) == LOW) {
+        while (digitalRead(PIN_CONFIRM_BUTTON) == LOW) {
             delay(50);
         }
 
         // 3. Messung
-        float B = readMagnet_B_total_filtered();
+        float B = ReadSensorEMA();
         if (B <= 0) {
             showError("Ungueltiger Sensorwert");
             return;  // Kalibrierung abbrechen wenn B nicht größer 1
@@ -401,7 +401,7 @@ void modusKalibrierung() {
     }
 
     // 5. Regression durchführen
-    berechneLogFunktion();
+    CalculateLogCalibrationFit();
     regressionDone = true;
 
     // 6. Erfolgsmeldung
@@ -411,13 +411,13 @@ void modusKalibrierung() {
 
 void modusPWM() {
     static uint32_t nextDisplay = 0;
-    float B = readMagnet_B_total_filtered();                                                      // Magnetfelddaten inkl Trimmung
+    float B = ReadSensorEMA();                                                      // Magnetfelddaten inkl Trimmung
     Serial.println(B);                                                                            // Debug Ausgabe
     if(B <= 0){                                                                                   // Plausibilitäþscheck
         showError("Ungueltiger Sensorwert");
     return; 
     }                                   
-    float D_meas = B_to_D(B);
+    float D_meas = MagToDiameter(B);
     
     if ((int32_t)(millis() - nextDisplay) >= 0) {
     update_Display(D_meas);                                                                       // zeichnet ohne eigenes delay
@@ -433,10 +433,10 @@ void modusRegelbetrieb() {
       return;  
     }
 
-    float B = readMagnet_B_total_filtered();                                                    //Getrimmte Magnetfeldwerte
+    float B = ReadSensorEMA();                                                    //Getrimmte Magnetfeldwerte
     Serial.println(B);
     if(B <= 0){ showError("Ungueltiger Sensorwert"); return; }                                  //Plausibilitätscheck
-    float D_meas = B_to_D(B);
+    float D_meas = MagToDiameter(B);
     Serial.print("D_meas= ");
     Serial.println(D_meas);
     if(isnan(D_meas)){ showError("Fehler Berechnung D"); return; }                              //Prüft Gültigkeit des Ergebnisses
@@ -445,10 +445,10 @@ void modusRegelbetrieb() {
     float rpmSet = 0.0f;                                                                        //Geforderte Drehzahl
 
     // Feed-Forward (PID ist auskommentiert)
-    rpmSet = volumeFeedForward(TARGET_DIAMETER_MM, D_meas, (float)current_rpm);
+    rpmSet = volumeFeedForward(TARGET_DIAMETER_MM, D_meas, (float)CurrentStepsPerS);
 
     rpmSet = constrain(rpmSet, 0.0f, RPM_MAX);                                                  //Untere Grenze -> Kein Rückwärtslauf
-    targetSpeed = (int16_t)rpmSet; // immer aktiv
+    targetStepsPerS = (int16_t)rpmSet; // immer aktiv
 
     // Stabilitäts-Check
     if(fabs(err) <= STABLE_TOLERANCE) {
@@ -462,9 +462,9 @@ void modusRegelbetrieb() {
     }
 
     showStatus(TARGET_DIAMETER_MM, D_meas, "Regel");                                            //Zeigt Soll und Ist auf Monitor
-    sendData(targetSpeed);                                                                      //Schickt Target Speed an Arduino
+    sendData(targetStepsPerS);                                                                      //Schickt Target Speed an Arduino
 
-    float t_sec = berechneTotzeit(targetSpeed);                                                 //Totzeit zur Stabilisierung
+    float t_sec = berechneTotzeit(targetStepsPerS);                                                 //Totzeit zur Stabilisierung
     if (t_sec > 0) {
         unsigned long t_ms = (unsigned long)(t_sec * 1000.0f);
 //      Serial.print("Dynamische Pause bis: ");

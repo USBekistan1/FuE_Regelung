@@ -19,7 +19,7 @@
 
 //float a = -1.2415, b = 6.2856;                                            //alte Logik, warum anders?
 
-float a = -1.1563, b = 5.9946;                                          // 9 Messpunkte, sehr gut zwischen 1-2mm
+float calA = -1.1563, calB = 5.9946;                                          // 9 Messpunkte, sehr gut zwischen 1-2mm
 
 //float a = -1.0608, b = 5.6301;                                          // Auch ohne Stab kalibriert -> Größere Abweichungen zwischen 1 und 2mm                             
 
@@ -34,7 +34,7 @@ TLx493D_A1B6 Tlv493dMagnetic3DSensor(Wire, TLx493D_IIC_ADDR_A0_e);        // Sel
 // Läuft nicht-blockierend, 50 Hz Abtastrate (20 ms Schrittzeit)
 // Glättet die Magnetfeldmessung über X/Y/Z und gibt den Betrag zurück.
 
-float readMagnet_B_total_filtered() {
+float ReadSensorEMA() {
   static unsigned long lastSampleTime = 0;                // letzter Messzeitpunkt
   static bool initialized = false;                        // erster Durchlauf?
   static float emaX = 0.0f, emaY = 0.0f, emaZ = 0.0f;     // EMA-Zwischenspeicher
@@ -115,7 +115,7 @@ void loop() {
       now = millis();                                             
 
     // Wert immer berechnen (Sensor-EMA läuft intern mit 50 Hz)
-    D = a * log(readMagnet_B_total_filtered()) + b;
+    D = calA * log(ReadSensorEMA()) + calB;
 
     // Nur alle 500 ms einmal auf Serial ausgeben -> 2 Hz
     if (now - lastPrintTime >= 500) {

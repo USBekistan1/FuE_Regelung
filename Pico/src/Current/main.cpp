@@ -5,17 +5,17 @@
 #include <math.h>
 #include <algorithm>
 
-float berechneGeschwindigkeit(long stepsProSekunde);
-float readMagnet_B_total_filtered();
-float B_to_D(float B);
+float CalculateMetersPerMin(long stepsProSekunde);
+float ReadSensorEMA();
+float MagToDiameter(float B);
 void update_Display(float dIst);
 bool requestData();
 void showError(const char* msg);
 void showMessage(const char* msg, int TextSize);
 void showCalibrationParams(float a, float b);
-void modusKalibrierung();
-void resetMagnetFilter();
-void berechneLogFunktion();
+void RunCalibration();
+void ResetMagEMA();
+void CalculateLogCalibrationFit();
 
 
 Adafruit_SH1106G display(128, 64, &Wire);                                 // Selber I2C Bus -> Display Updaterate checken!!
@@ -23,20 +23,20 @@ using namespace ifx::tlx493d;
 TLx493D_A1B6 Tlv493dMagnetic3DSensor(Wire, TLx493D_IIC_ADDR_A0_e);        // Selber Bus (Sensor & Display)
 
 // ----- Kalibrierung -----
-#define PIN_CONFIRM 18            // Pin für den Bestätigungs-Knopf
+#define PIN_CONFIRM_BUTTON 18            // Pin für den Bestätigungs-Knopf
 
-#define NUM_CAL_SAMPLES 9
-const float calDiameters[NUM_CAL_SAMPLES] = {1.0f, 1.2f, 1.4f, 1.6f, 1.7f, 1.75f, 1.8f, 1.9f, 2.0f};
-float a = -1.1563, b = 5.9946;                                              // Koeffizienten der Kalibrierungsgeraden
-float F_vals[NUM_CAL_SAMPLES];    // Sensorwerte (B-Betrag)
-float D_vals[NUM_CAL_SAMPLES];    // Referenzdurchmesser
+#define CAL_SAMPLE_COUNT 9
+const float CAL_DIAMETERS_MM[CAL_SAMPLE_COUNT] = {1.0f, 1.2f, 1.4f, 1.6f, 1.7f, 1.75f, 1.8f, 1.9f, 2.0f};
+float calA = -1.1563, calB = 5.9946;                                              // Koeffizienten der Kalibrierungsgeraden
+float magSamples[CAL_SAMPLE_COUNT];    // Sensorwerte (B-Betrag)
+float diameterSamples[CAL_SAMPLE_COUNT];    // Referenzdurchmesser
 bool regressionDone = false;
 
 
 // ----- EMA -----
 const unsigned long SAMPLE_PERIOD_MS = 20;  // 50 Hz
 
-unsigned long emaLastSampleTime = 0;
+unsigned long emaLastSampleMs = 0;
 bool          emaInitialized    = false;
 float         emaX = 0.0f, emaY = 0.0f, emaZ = 0.0f;
 float         emaLastMagnitude  = 0.0f;
@@ -49,10 +49,10 @@ const float DIAMETER = 0.05;                    // Durchmesser der Welle in Mete
 const float CIRCUMFERENCE = PI * DIAMETER;      // Umfang in Metern
 
 // -------- I2C ----------
-volatile int16_t targetSpeed = 0;                                         // Zielgeschwindigkeit, 2 Byte
-volatile int16_t current_rpm = 0;                                         // Ist-Geschwindigkeit
-volatile bool mode = false;                                               // Default Regelbetrieb
-volatile bool isrunning = true;                                           // warum volatile? Keine ISR oder? Juckt wahrscheinlich nicht
+volatile int16_t targetStepsPerS = 0;                                         // Zielgeschwindigkeit, 2 Byte
+volatile int16_t CurrentStepsPerS = 0;                                         // Ist-Geschwindigkeit
+volatile bool isAutoMode = false;                                               // Default Regelbetrieb
+volatile bool isMotorRunning = true;                                           // warum volatile? Keine ISR oder? Juckt wahrscheinlich nicht
 
 
 
@@ -61,17 +61,17 @@ volatile bool isrunning = true;                                           // war
 // Läuft nicht-blockierend, 50 Hz Abtastrate (20 ms Schrittzeit)
 // Glättet die Magnetfeldmessung über X/Y/Z und gibt den Betrag zurück.
 
-float readMagnet_B_total_filtered() {
+float ReadSensorEMA() {
   const float TAU_S = 0.20f;                              // Zeitkonstante -> Größer heißt Filter träger; Macht das ganze zeitabhängig und nicht abhängig von Anzahl Messungen
   const float dt = SAMPLE_PERIOD_MS / 1000.0f;
   const float alpha = 1.0f - expf(-dt / TAU_S);           // Wie stark verdrängt der neue Messwert den alten Wert?
 
   const unsigned long now = millis();
-  if (now - emaLastSampleTime < SAMPLE_PERIOD_MS) {
+  if (now - emaLastSampleMs < SAMPLE_PERIOD_MS) {
     // Noch kein neues Sample fällig → letzten Wert zurückgeben
     return emaLastMagnitude;
   }
-  emaLastSampleTime = now;
+  emaLastSampleMs = now;
 
   // --- Sensor auslesen (wie in deinem bestehenden Code) ---
   double x, y, z;                                                                         // loke Variablen für Sensor (jede Achse)
@@ -93,24 +93,24 @@ float readMagnet_B_total_filtered() {
   return emaLastMagnitude;
 }
 
-void resetMagnetFilter() {          //Frische Ema für jeden neuen Stab
+void ResetMagEMA() {          //Frische Ema für jeden neuen Stab
   emaInitialized = false;
   emaX = emaY = emaZ = 0.0f;
   emaLastMagnitude = 0.0f;
-  emaLastSampleTime = 0;
+  emaLastSampleMs = 0;
 }
 
-void modusKalibrierung() {
+void RunCalibration() {
   const unsigned long WARMUP_MS = 500;   // Zeit, damit EMA sich auf neuen Stab einstellt
   const unsigned long SETTLE_MS = 1000;  // Zeit, über die wir für den Mittelwert sampeln
   const unsigned long SAMPLE_DELAY_MS = 20;
 
-  while (digitalRead(PIN_CONFIRM) == HIGH) {
+  while (digitalRead(PIN_CONFIRM_BUTTON) == HIGH) {
       delay(50);
   }
 
-  for (int sampleIndex = 0; sampleIndex < NUM_CAL_SAMPLES; sampleIndex++) {
-    float d_real = calDiameters[sampleIndex];
+  for (int sampleIndex = 0; sampleIndex < CAL_SAMPLE_COUNT; sampleIndex++) {
+    float d_real = CAL_DIAMETERS_MM[sampleIndex];
 
     // 1. Anzeige des aktuellen Prüfstabs
     char buf[20];
@@ -120,20 +120,20 @@ void modusKalibrierung() {
 
     // 2. Auf Knopfdruck warten (INPUT_PULLDOWN + Taster an 3V3)
     // warten bis gedrückt (LOW -> HIGH)
-    while (digitalRead(PIN_CONFIRM) == LOW) {
+    while (digitalRead(PIN_CONFIRM_BUTTON) == LOW) {
       delay(50);
     }
     // warten bis losgelassen (HIGH -> LOW)
-    while (digitalRead(PIN_CONFIRM) == HIGH) {
+    while (digitalRead(PIN_CONFIRM_BUTTON) == HIGH) {
       delay(50);
     }
 
-    resetMagnetFilter();
+    ResetMagEMA();
 
     // 3a. WARMUP-PHASE: EMA darf sich auf den neuen Stab einstellen
     unsigned long tStart = millis();
     while (millis() - tStart < WARMUP_MS) {
-      (void)readMagnet_B_total_filtered();   // Wert wird verworfen, nur Filter updaten
+      (void)ReadSensorEMA();   // Wert wird verworfen, nur Filter updaten
       delay(SAMPLE_DELAY_MS);
     }
 
@@ -143,7 +143,7 @@ void modusKalibrierung() {
     tStart = millis();
 
     while (millis() - tStart < SETTLE_MS) {
-      float Bnow = readMagnet_B_total_filtered();
+      float Bnow = ReadSensorEMA();
       Bsum += Bnow;
       Bcount++;
       delay(SAMPLE_DELAY_MS);
@@ -161,27 +161,27 @@ void modusKalibrierung() {
       return;
     }
 
-    D_vals[sampleIndex] = d_real;
-    F_vals[sampleIndex] = B;
+    diameterSamples[sampleIndex] = d_real;
+    magSamples[sampleIndex] = B;
   }
 
   // 4. Regression durchführen
-  berechneLogFunktion();
+  CalculateLogCalibrationFit();
   regressionDone = true;
 
   // 5. Parameter anzeigen
-  showCalibrationParams(a, b);  // deine Anzeige-Funktion für a,b
+  showCalibrationParams(calA, calB);  // deine Anzeige-Funktion für a,b
   delay(2000);
 }
 
-void berechneLogFunktion() {
+void CalculateLogCalibrationFit() {
   float sumLnB = 0.0f, sumD = 0.0f, sumLnB2 = 0.0f, sumLnB_D = 0.0f;
   int nEff = 0;
 
-  for (int i = 0; i < NUM_CAL_SAMPLES; i++) {
-    if (F_vals[i] <= 0) continue;
-    float lnB = log(F_vals[i]);
-    float D = D_vals[i];
+  for (int i = 0; i < CAL_SAMPLE_COUNT; i++) {
+    if (magSamples[i] <= 0) continue;
+    float lnB = log(magSamples[i]);
+    float D = diameterSamples[i];
 
     sumLnB   += lnB;
     sumD     += D;
@@ -192,13 +192,13 @@ void berechneLogFunktion() {
 
   float denom = nEff * sumLnB2 - sumLnB * sumLnB;
     if (denom != 0 && nEff > 0) {
-    a = (nEff * sumLnB_D - sumLnB * sumD) / denom;
-    b = (sumD - a * sumLnB) / nEff;
+    calA = (nEff * sumLnB_D - sumLnB * sumD) / denom;
+    calB = (sumD - calA * sumLnB) / nEff;
 
     Serial.print("Kalibrierung fertig. a = ");
-    Serial.print(a, 6);
+    Serial.print(calA, 6);
     Serial.print(" , b = ");
-    Serial.println(b, 6);
+    Serial.println(calB, 6);
 
   } else {
     showError("Regression fehlgeschlagen");
@@ -210,7 +210,7 @@ void update_Display(float dIst) {
     // Display statischen Text anzeigen
   display.setTextSize(1.95);
   display.setTextColor(SH110X_WHITE);
-  float speed_m_per_min = berechneGeschwindigkeit(current_rpm);  
+  float speed_m_per_min = CalculateMetersPerMin(CurrentStepsPerS);  
   display.setCursor(0, 0);
   display.print("Speed: ");
   display.setCursor(0, 12);
@@ -298,14 +298,14 @@ bool requestData() {
     bool running    = Wire.read();
     bool modeVal    = Wire.read();
 
-    current_rpm = speed;
-    isrunning   = running;
-    mode        = modeVal;
+    CurrentStepsPerS = speed;
+    isMotorRunning   = running;
+    isAutoMode        = modeVal;
 
     return true;
 }
 
-float berechneGeschwindigkeit(long stepsProSekunde) {
+float CalculateMetersPerMin(long stepsProSekunde) {
   float revsPerSec = (float)stepsProSekunde / STEPS_PER_REV;  // Umdrehungen pro Sekunde
   float revsPerMin = revsPerSec * 60.0;                       // U/min
   float v_mPerMin = CIRCUMFERENCE * revsPerMin;               // m/min
@@ -314,7 +314,7 @@ float berechneGeschwindigkeit(long stepsProSekunde) {
 
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(PIN_CONFIRM, INPUT_PULLDOWN);
+  pinMode(PIN_CONFIRM_BUTTON, INPUT_PULLDOWN);
 
   Serial.begin(115200);
   delay(2000);      // Damit Serial genug Zeit zum starten hat
@@ -348,18 +348,18 @@ void loop() {
     showMessage("Kalibrieren?\nKurz drücken: Nein\nLang Drücken: Ja", 1);
 
     // Warten bis der Knopf EINMAL gedrueckt wird (LOW -> HIGH)
-    while (digitalRead(PIN_CONFIRM) == LOW) {
+    while (digitalRead(PIN_CONFIRM_BUTTON) == LOW) {
         delay(50);   
     }
 
     unsigned long start = millis();
     delay(50);   // Entprellen
 
-    while(digitalRead(PIN_CONFIRM) == HIGH){
+    while(digitalRead(PIN_CONFIRM_BUTTON) == HIGH){
       if (millis()-start >= 2000){
         showMessage("Kalibrierung wird\ngestartet", 1);
         delay (2000);
-        modusKalibrierung();
+        RunCalibration();
       }
     }
     regressionDone = true;  // Frage nur einmal stellen
@@ -373,7 +373,7 @@ void loop() {
     }
 
     // --- Magnetfeld -> Durchmesser ---
-    float D = a * log(readMagnet_B_total_filtered()) + b;
+    float D = calA * log(ReadSensorEMA()) + calB;
 
     // --- Anzeige + Serial alle 500 ms ---
     static unsigned long lastPrintTime = 0;
@@ -392,7 +392,7 @@ void loop() {
 
 
         float t_s = now / 1000.0f;                  // Zeit in Sekunden
-        float v_m_per_min = berechneGeschwindigkeit(current_rpm);
+        float v_m_per_min = CalculateMetersPerMin(CurrentStepsPerS);
 
         Serial.print(t_s, 3);        
         Serial.print(';');

@@ -10,80 +10,83 @@
 #include "hardware/sync.h"
 #include <string.h>   // für memset/memcpy
 
-float berechneGeschwindigkeit(long stepsProSekunde);
-float readMagnet_B_total_filtered();
-float B_to_D(float B);
-void update_Display_Man(float dIst);
-void update_Display_Auto(float dSoll, float dIst, bool rampDone);
-void update_Display_Sollwahl(float dSoll);
-bool requestData();
-void showError(const char* msg);
-void showMessage(const char* msg, int TextSize);
-void showCalibrationParams(float a, float b);
-void modusKalibrierung();
-void resetMagnetFilter();
-void berechneLogFunktion();
-void saveCalibrationToFlash(float aNew, float bNew);
+// Sensor Funktionen
+float ReadSensorEMA();
+float MagToDiameter(float mag);
+void  ResetMagEMA();
+
+// Kalibrierung Funktionen
+void RunCalibration();
+void SaveCalibrationToFlash(float newCalA, float newCalB);
 bool loadCalibrationFromFlash();
-void ManMode();
-void AutoMode();
-bool i2c_bus_recover();
+void CalculateLogCalibrationFit();
+
+// I2C/Recover  Funktionen
+bool requestData();
+bool i2cRecoverBus();
 bool handleI2CRecoverHold();
+void sendSpeedToSlave(int16_t targetStepsPerSec);
 
-//Regelung
-int16_t berechneStepsAusDurchmesser(float d_soll);
-void sendSpeedToSlave(int16_t speedSteps);
+// Display Funktionen
+void Update_Display_Man(float measuredDiameterMm);
+void update_Display_Auto(float targetDiameterMm, float measuredDiameterMm, bool rampDone);
+void Update_Display_TargetMM(float targetDiameterMm);
+void showError(const char* msg);
+void showMessage(const char* msg, int textSize);
+void showCalibrationParams(float calA, float calB);
 
+// Modes
+void    ManMode();
+void    AutoMode();
+int16_t CalculateStepsPerSec(float targetDiameterMm);
+float   CalculateMetersPerMin(long stepsPerSec);
 
 Adafruit_SH1106G display(128, 64, &Wire);                                 // Selber I2C Bus -> Display Updaterate checken!!
 using namespace ifx::tlx493d;
 TLx493D_A1B6 Tlv493dMagnetic3DSensor(Wire, TLx493D_IIC_ADDR_A0_e);        // Selber Bus (Sensor & Display)
 
 // ----- Kalibrierung -----
-#define PIN_CONFIRM 18            // Pin für den Bestätigungs-Knopf
+#define PIN_CONFIRM_BUTTON 18            // Pin für den Bestätigungs-Knopf
 
-#define NUM_CAL_SAMPLES 9
-const float calDiameters[NUM_CAL_SAMPLES] = {1.0f, 1.2f, 1.4f, 1.6f, 1.7f, 1.75f, 1.8f, 1.9f, 2.0f};
-float a = -1.1563, b = 5.9946;                                              // Koeffizienten der Kalibrierungsgeraden
-float F_vals[NUM_CAL_SAMPLES];    // Sensorwerte (B-Betrag)
-float D_vals[NUM_CAL_SAMPLES];    // Referenzdurchmesser
+#define CAL_SAMPLE_COUNT 9
+const float CAL_DIAMETERS_MM[CAL_SAMPLE_COUNT] = {1.0f, 1.2f, 1.4f, 1.6f, 1.7f, 1.75f, 1.8f, 1.9f, 2.0f};
+float calA = -1.1563, calB = 5.9946;                                              // Koeffizienten der Kalibrierungsgeraden
+float magSamples[CAL_SAMPLE_COUNT];    // Sensorwerte (B-Betrag)
+float diameterSamples[CAL_SAMPLE_COUNT];    // Referenzdurchmesser
 bool regressionDone = false;
 
 // ----- Flash-Speicher für Kalibrierung auf dem Pico -----
 #define FLASH_TARGET_OFFSET (256 * 1024)  // 256 kB hinter Programmanfang
-#define CALIB_MAGIC 0x4E696C73            // 'Nils' als Magic
+#define CALIB_MAGIC_TAG 0x4E696C73            // 'Nils' als Magic
 
 struct CalibData {
     uint32_t magic;
-    float a;
-    float b;
+    float calA;
+    float calB;
 };
 
 // Zeiger auf den Kalibrierbereich im Flash (XIP-Adresse)
 const CalibData* const flashCalib = (const CalibData*)(XIP_BASE + FLASH_TARGET_OFFSET);
 
-
 // ----- EMA -----
 const unsigned long SAMPLE_PERIOD_MS = 20;  // 50 Hz
 
-unsigned long emaLastSampleTime = 0;
+unsigned long emaLastSampleMs = 0;
 bool          emaInitialized    = false;
 float         emaX = 0.0f, emaY = 0.0f, emaZ = 0.0f;
 float         emaLastMagnitude  = 0.0f;
-
-
 
 // Weitere Variablen
 const int STEPS_PER_REV = 800;                  // Schritte pro Umdrehung
 const float DIAMETER = 0.05;                    // Durchmesser der Welle in Metern
 const float CIRCUMFERENCE = PI * DIAMETER;      // Umfang in Metern
-static unsigned long lastDisp = 0;
+static unsigned long lastDisplayMs = 0;
 
 // -------- I2C ----------
-volatile int16_t targetSpeed = 0;                                         // Zielgeschwindigkeit, 2 Byte
-volatile int16_t current_rpm = 0;                                         // Ist-Geschwindigkeit
-volatile bool mode = false;                                               // Default Regelbetrieb
-volatile bool isrunning = true;                                           // warum volatile? Keine ISR oder? Juckt wahrscheinlich nicht
+volatile int16_t targetStepsPerS = 0;                                         // Zielgeschwindigkeit, 2 Byte
+volatile int16_t CurrentStepsPerS = 0;                                         // Ist-Geschwindigkeit
+volatile bool isAutoMode = false;                                               // Default Regelbetrieb
+volatile bool isMotorRunning = true;                                           // warum volatile? Keine ISR oder? Juckt wahrscheinlich nicht
 
 // --- I2C Bus Recovery (Pico Arduino) ---
 static const int I2C_SDA_PIN = 4;
@@ -92,37 +95,37 @@ volatile bool blockRegStartUntilNewPress = false;               //Kein Automatis
 
 // ---- Vorsteuerung ----
 const float CONST_C = 5.939;       // Prozesskonstante
-float sollDurchmesser = 1.75;       // Dein gewünschter Zieldurchmesser in mm
-int16_t calculatedSteps = 0;       // Der berechnete Wert für den Arduino
+float targetDiameterMm = 1.75;       // Gewünschter Zieldurchmesser in mm
+int16_t calculatedStepsPerSec = 0;       // Der berechnete Wert für den Arduino
 bool rampDone = 0;
-static unsigned long pressStart = 0;
-enum AutoState : uint8_t { AUTO_SETPOINT, AUTO_FEEDFORWARD, AUTO_REG };
-AutoState autoState = AUTO_SETPOINT;
-volatile int16_t encDelta = 0;
+static unsigned long buttonPressStartMs = 0;
+enum AutoState : uint8_t { AUTO_SELECT_SETPOINT, AUTO_FEEDFORWARD_ONLY, AUTO_CONTROL_ACTIVE };
+AutoState autoState = AUTO_SELECT_SETPOINT;
+volatile int16_t encoderDelta = 0;
 
 // ---- Regelung ----
-const float REG_KI = 8.0f;
-float integralSum = 0.0f;
+const float KI_GAIN = 8.0f;
+float integralErrorSum = 0.0f;
 const float INTEGRAL_MAX = 1000.0f;
 
 // ---- Hysterese ----
-const float DB_IN_MM  = 0.06f;  // Regler geht AN, wenn größer
-const float DB_OUT_MM = 0.04f;  // Regler geht AUS, wenn kleiner
-static bool RegActive = false;
+const float DEADBAND_IN_MM  = 0.06f;  // Regler geht AN, wenn größer
+const float DEADBAND_OUT_MM = 0.04f;  // Regler geht AUS, wenn kleiner
+static bool isControlActive = false;
 
 
 // ======== EMA-Filter für TLx493D ========
 // Läuft nicht-blockierend, 50 Hz Abtastrate (20 ms Schrittzeit)
 // Glättet die Magnetfeldmessung über X/Y/Z und gibt den Betrag zurück.
 
-float readMagnet_B_total_filtered() {
-  static uint32_t tlvOk = 0;
-  static uint32_t tlvFail = 0;
-  static unsigned long lastStat = 0;
+float ReadSensorEMA() {
+  static uint32_t okCount = 0;
+  static uint32_t failCount = 0;
+  static unsigned long lastStatMs = 0;
 
-  const float TAU_S = 0.20f;
+  const float EMA_TAU_S = 0.20f;
   const float dt = SAMPLE_PERIOD_MS / 1000.0f;
-  const float alpha = 1.0f - expf(-dt / TAU_S);
+  const float alpha = 1.0f - expf(-dt / EMA_TAU_S);
   const unsigned long now = millis();
 
   //static unsigned long lastReinit = 0;
@@ -131,10 +134,10 @@ float readMagnet_B_total_filtered() {
   static uint16_t failCount = 0;
 
   // 50 Hz gating
-  if (now - emaLastSampleTime < SAMPLE_PERIOD_MS) {
+  if (now - emaLastSampleMs < SAMPLE_PERIOD_MS) {
     return emaLastMagnitude;
   }
-  emaLastSampleTime = now;
+  emaLastSampleMs = now;
 
   double x, y, z;
 
@@ -142,7 +145,7 @@ float readMagnet_B_total_filtered() {
 
   if (ok) {
     failCount = 0;
-    tlvOk++;
+    okCount++;
 
     if (!emaInitialized) {
       emaX = (float)x;
@@ -159,11 +162,11 @@ float readMagnet_B_total_filtered() {
   } else {
     emaInitialized = false;
     failCount++;
-    tlvFail++;
+    failCount++;
 
     /*if (now - lastReinit > REINIT_PERIOD_MS) {
       lastReinit = now;
-      bool rec = i2c_bus_recover();
+      bool rec = i2cRecoverBus();
       if (Serial) Serial.println(rec ? "I2C rec OK (sensor)" : "I2C rec FAIL (sensor)");
       Tlv493dMagnetic3DSensor.begin();
     }*/
@@ -175,28 +178,27 @@ float readMagnet_B_total_filtered() {
   }
 
   // 1 Hz Statistik (wichtig: vor dem return!)
-  if (now - lastStat > 1000) {
-    lastStat = now;
+  if (now - lastStatMs > 1000) {
+    lastStatMs = now;
     if (Serial) {
       Serial.print("TLV ok=");
-      Serial.print(tlvOk);
+      Serial.print(okCount);
       Serial.print(" fail=");
-      Serial.println(tlvFail);
+      Serial.println(failCount);
     }
   }
 
   return emaLastMagnitude;
 }
 
-void resetMagnetFilter() {          //Frische Ema für jeden neuen Stab
+void ResetMagEMA() {          //Frische Ema für jeden neuen Stab
   emaInitialized = false;
   emaX = emaY = emaZ = 0.0f;
   emaLastMagnitude = 0.0f;
-  emaLastSampleTime = 0;
+  emaLastSampleMs = 0;
 }
 
-
-bool i2c_bus_recover() {
+bool i2cRecoverBus() {
   // 1) I2C "stoppen" – je nach Core gibt's kein Wire.end()
   // Wir machen stattdessen GPIO-Recovery direkt.
 
@@ -249,29 +251,29 @@ bool i2c_bus_recover() {
 }
 
 bool handleI2CRecoverHold() {
-  const unsigned long HOLD_MS = 5000;
+  const unsigned long RECOVER_HOLD_MS = 5000;
 
-  static unsigned long tStart = 0;
-  static bool armed = true;
+  static unsigned long holdStartMs = 0;
+  static bool isArmed = true;
 
   unsigned long now = millis();
-  bool btn = (digitalRead(PIN_CONFIRM) == HIGH);
+  bool isButtonPressed = (digitalRead(PIN_CONFIRM_BUTTON) == HIGH);
 
-  if (!btn) {
-    tStart = 0;
-    armed = true;
+  if (!isButtonPressed) {
+    holdStartMs = 0;
+    isArmed = true;
     return false;
   }
 
-  if (tStart == 0) tStart = now;
+  if (holdStartMs == 0) holdStartMs = now;
 
-  if (armed && (now - tStart >= HOLD_MS)) {
-    armed = false;
+  if (isArmed && (now - holdStartMs >= RECOVER_HOLD_MS)) {
+    isArmed = false;
 
     showMessage("I2C recover...\nBitte warten", 1);
     if (Serial) Serial.println("Manual I2C recover (5s hold)");
 
-    bool rec = i2c_bus_recover();
+    bool rec = i2cRecoverBus();
     blockRegStartUntilNewPress = true;
 
     if (rec) {
@@ -282,14 +284,14 @@ bool handleI2CRecoverHold() {
       if (Serial) Serial.println("I2C recover FAIL");
     }
 
-    resetMagnetFilter();
+    ResetMagEMA();
 
     // Muss loslassen, sonst retrigger/Confirm-chaos
-    while (digitalRead(PIN_CONFIRM) == HIGH) delay(5);
+    while (digitalRead(PIN_CONFIRM_BUTTON) == HIGH) delay(5);
 
     // States zurücksetzen für nächsten Hold
-    tStart = 0;
-    armed = true;
+    holdStartMs = 0;
+    isArmed = true;
 
     return true; // wurde getriggert
   }
@@ -297,91 +299,91 @@ bool handleI2CRecoverHold() {
   return false;
 }
 
-void modusKalibrierung() {
-  const unsigned long WARMUP_MS = 500;   // Zeit, damit EMA sich auf neuen Stab einstellt
-  const unsigned long SETTLE_MS = 1000;  // Zeit, über die wir für den Mittelwert sampeln
-  const unsigned long SAMPLE_DELAY_MS = 20;
+void RunCalibration() {
+  const unsigned long CAL_WARMUP_MS = 500;   // Zeit, damit EMA sich auf neuen Stab einstellt
+  const unsigned long CAL_SETTLE_MS = 1000;  // Zeit, über die wir für den Mittelwert sampeln
+  const unsigned long CAL_SAMPLE_DELAY_MS = 20;
 
-  while (digitalRead(PIN_CONFIRM) == HIGH) {
+  while (digitalRead(PIN_CONFIRM_BUTTON) == HIGH) {
       delay(50);
   }
 
-  for (int sampleIndex = 0; sampleIndex < NUM_CAL_SAMPLES; sampleIndex++) {
-    float d_real = calDiameters[sampleIndex];
+  for (int sampleIndex = 0; sampleIndex < CAL_SAMPLE_COUNT; sampleIndex++) {
+    float diameterMm = CAL_DIAMETERS_MM[sampleIndex];
 
     // 1. Anzeige des aktuellen Prüfstabs
-    char buf[20];
-    sprintf(buf, "Stab: %.2f mm", d_real);
-    Serial.println(buf);
-    showMessage(buf, 2);
+    char line[20];
+    sprintf(line, "Stab: %.2f mm", diameterMm);
+    Serial.println(line);
+    showMessage(line, 2);
 
     // 2. Auf Knopfdruck warten (INPUT_PULLDOWN + Taster an 3V3)
     // warten bis gedrückt (LOW -> HIGH)
-    while (digitalRead(PIN_CONFIRM) == LOW) {
+    while (digitalRead(PIN_CONFIRM_BUTTON) == LOW) {
       delay(50);
     }
     // warten bis losgelassen (HIGH -> LOW)
-    while (digitalRead(PIN_CONFIRM) == HIGH) {
+    while (digitalRead(PIN_CONFIRM_BUTTON) == HIGH) {
       delay(50);
     }
 
-    resetMagnetFilter();
+    ResetMagEMA();
 
     // 3a. WARMUP-PHASE: EMA darf sich auf den neuen Stab einstellen
-    unsigned long tStart = millis();
-    while (millis() - tStart < WARMUP_MS) {
-      (void)readMagnet_B_total_filtered();   // Wert wird verworfen, nur Filter updaten
-      delay(SAMPLE_DELAY_MS);
+    unsigned long startMs = millis();
+    while (millis() - startMs < CAL_WARMUP_MS) {
+      (void)ReadSensorEMA();   // Wert wird verworfen, nur Filter updaten
+      delay(CAL_SAMPLE_DELAY_MS);
     }
 
     // 3b. SETTLE-PHASE: jetzt Werte für den Mittelwert einsammeln
-    float Bsum = 0.0f;
-    int   Bcount = 0;
-    tStart = millis();
+    float magSum = 0.0f;
+    int   magCount = 0;
+    startMs = millis();
 
-    while (millis() - tStart < SETTLE_MS) {
-      float Bnow = readMagnet_B_total_filtered();
-      Bsum += Bnow;
-      Bcount++;
-      delay(SAMPLE_DELAY_MS);
+    while (millis() - startMs < CAL_SETTLE_MS) {
+      float magNow = ReadSensorEMA();
+      magSum += magNow;
+      magCount++;
+      delay(CAL_SAMPLE_DELAY_MS);
     }
 
-    float B = (Bcount > 0) ? (Bsum / Bcount) : 0.0f;
+    float magAvg = (magCount > 0) ? (magSum / magCount) : 0.0f;
 
     Serial.print("B_avg[");
     Serial.print(sampleIndex);
     Serial.print("] = ");
-    Serial.println(B, 6);
+    Serial.println(magAvg, 6);
 
-    if (B <= 0) {
+    if (magAvg <= 0) {
       showError("Ungueltiger Sensorwert");
       return;
     }
 
-    D_vals[sampleIndex] = d_real;
-    F_vals[sampleIndex] = B;
+    diameterSamples[sampleIndex] = diameterMm;
+    magSamples[sampleIndex] = magAvg;
   }
 
   // 4. Regression durchführen
-  berechneLogFunktion();
+  CalculateLogCalibrationFit();
   regressionDone = true;
 
   // 5. Parameter anzeigen
-  showCalibrationParams(a, b);  // deine Anzeige-Funktion für a,b
+  showCalibrationParams(calA, calB);  // deine Anzeige-Funktion für a,b
   delay(2000);
 
   // 6. Kalibrierung im Flash speichern
-  saveCalibrationToFlash(a, b);
+  SaveCalibrationToFlash(calA, calB);
 }
 
-void berechneLogFunktion() {
+void CalculateLogCalibrationFit() {
   float sumLnB = 0.0f, sumD = 0.0f, sumLnB2 = 0.0f, sumLnB_D = 0.0f;
   int nEff = 0;
 
-  for (int i = 0; i < NUM_CAL_SAMPLES; i++) {
-    if (F_vals[i] <= 0) continue;
-    float lnB = log(F_vals[i]);
-    float D = D_vals[i];
+  for (int i = 0; i < CAL_SAMPLE_COUNT; i++) {
+    if (magSamples[i] <= 0) continue;
+    float lnB = log(magSamples[i]);
+    float D = diameterSamples[i];
 
     sumLnB   += lnB;
     sumD     += D;
@@ -392,13 +394,13 @@ void berechneLogFunktion() {
 
   float denom = nEff * sumLnB2 - sumLnB * sumLnB;
     if (denom != 0 && nEff > 0) {
-    a = (nEff * sumLnB_D - sumLnB * sumD) / denom;
-    b = (sumD - a * sumLnB) / nEff;
+    calA = (nEff * sumLnB_D - sumLnB * sumD) / denom;
+    calB = (sumD - calA * sumLnB) / nEff;
 
     Serial.print("Kalibrierung fertig. a = ");
-    Serial.print(a, 6);
+    Serial.print(calA, 6);
     Serial.print(" , b = ");
-    Serial.println(b, 6);
+    Serial.println(calB, 6);
 
   } else {
     showError("Regression fehlgeschlagen");
@@ -406,42 +408,42 @@ void berechneLogFunktion() {
 }
 
 bool loadCalibrationFromFlash() {
-    if (flashCalib->magic != CALIB_MAGIC) {
+    if (flashCalib->magic != CALIB_MAGIC_TAG) {
         Serial.println("Flash-Kalibrierung: kein gueltiger Eintrag");
         return false;
     }
 
-    a = flashCalib->a;
-    b = flashCalib->b;
+    calA = flashCalib->calA;
+    calB = flashCalib->calB;
 
     Serial.print("Flash-Kalibrierung geladen: a=");
-    Serial.print(a, 6);
+    Serial.print(calA, 6);
     Serial.print(" , b=");
-    Serial.println(b, 6);
+    Serial.println(calB, 6);
 
     return true;
 }
 
-void saveCalibrationToFlash(float aNew, float bNew) {
+void SaveCalibrationToFlash(float newCalA, float newCalB) {
     CalibData data;
-    data.magic = CALIB_MAGIC;
-    data.a = aNew;
-    data.b = bNew;
+    data.magic = CALIB_MAGIC_TAG;
+    data.calA = newCalA;
+    data.calB = newCalB;
 
-    uint8_t buf[FLASH_PAGE_SIZE];
-    memset(buf, 0xFF, sizeof(buf));
-    memcpy(buf, &data, sizeof(data));
+    uint8_t line[FLASH_PAGE_SIZE];
+    memset(line, 0xFF, sizeof(line));
+    memcpy(line, &data, sizeof(data));
 
     uint32_t irq_state = save_and_disable_interrupts();
     flash_range_erase(FLASH_TARGET_OFFSET, FLASH_SECTOR_SIZE);
-    flash_range_program(FLASH_TARGET_OFFSET, buf, FLASH_PAGE_SIZE);
+    flash_range_program(FLASH_TARGET_OFFSET, line, FLASH_PAGE_SIZE);
     restore_interrupts(irq_state);
 
     Serial.println("Kalibrierung im Flash gespeichert");
 }
 
-void update_Display_Man(float dIst) {
-  float speed_m_per_min = berechneGeschwindigkeit(current_rpm);  
+void Update_Display_Man(float measuredDiameterMm) {
+  float speed_m_per_min = CalculateMetersPerMin(CurrentStepsPerS);  
   display.clearDisplay();
   // Display statischen Text anzeigen
   display.setTextSize(1.95);
@@ -454,7 +456,7 @@ void update_Display_Man(float dIst) {
   //display.setCursor(0,24);
   display.println("Ist-Durchm.: ");
   //display.setCursor(0,36);
-  display.println(dIst);
+  display.println(measuredDiameterMm);
   display.println(" mm");
 
   Serial.println("OLED: before display()");
@@ -462,8 +464,8 @@ void update_Display_Man(float dIst) {
   Serial.println("OLED: after display()");
 }
 
-void update_Display_Auto(float dSoll, float dIst, bool rampDone){
-  float speed_m_per_min = berechneGeschwindigkeit(current_rpm);  
+void update_Display_Auto(float targetDiameterMm, float measuredDiameterMm, bool rampDone){
+  float speed_m_per_min = CalculateMetersPerMin(CurrentStepsPerS);  
 
   display.clearDisplay();
   display.setTextSize(1.95);
@@ -471,11 +473,11 @@ void update_Display_Auto(float dSoll, float dIst, bool rampDone){
   display.setCursor(0,0);
 
   display.print("Soll: ");
-  display.print(dSoll, 2);
+  display.print(targetDiameterMm, 2);
   display.println(" mm");
 
   display.print("Ist : ");
-  display.print(dIst, 2);
+  display.print(measuredDiameterMm, 2);
   display.println(" mm");
 
   display.print("Speed: ");
@@ -490,14 +492,14 @@ void update_Display_Auto(float dSoll, float dIst, bool rampDone){
   //Serial.println("OLED: after display()");
 }
 
-void update_Display_Sollwahl(float dSoll){
+void Update_Display_TargetMM(float targetDiameterMm){
   display.clearDisplay();
   display.setTextSize(1.95);
   display.setTextColor(SH110X_WHITE);
   display.setCursor(0,0);
 
   display.print("Soll: ");
-  display.print(dSoll, 2);
+  display.print(targetDiameterMm, 2);
   display.println(" mm");
 
   display.println();
@@ -519,9 +521,9 @@ void showError(const char* msg) {
   delay(2000);
 }
 
-void showMessage(const char* msg, int TextSize) {
+void showMessage(const char* msg, int textSize) {
   display.clearDisplay();
-  display.setTextSize(TextSize);
+  display.setTextSize(textSize);
   display.setTextColor(SH110X_WHITE);
 
   int y = 0;
@@ -581,18 +583,16 @@ bool requestData() {
 
     int16_t delta = (int16_t)((Wire.read() << 8) | Wire.read());
 
-    current_rpm = speed;
-    isrunning   = running;
-    mode        = modeVal;
-    encDelta    = delta;
+    CurrentStepsPerS = speed;
+    isMotorRunning   = running;
+    isAutoMode        = modeVal;
+    encoderDelta    = delta;
 
     return true;
 }
 
-
-
-float berechneGeschwindigkeit(long stepsProSekunde) {
-  float revsPerSec = (float)stepsProSekunde / STEPS_PER_REV;  // Umdrehungen pro Sekunde
+float CalculateMetersPerMin(long stepsPerSec) {
+  float revsPerSec = (float)stepsPerSec / STEPS_PER_REV;  // Umdrehungen pro Sekunde
   float revsPerMin = revsPerSec * 60.0;                       // U/min
   float v_mPerMin = CIRCUMFERENCE * revsPerMin;               // m/min
   return v_mPerMin;
@@ -601,16 +601,16 @@ float berechneGeschwindigkeit(long stepsProSekunde) {
 void ManMode(){
   if (handleI2CRecoverHold()) return;       //Bus Recover Abfrage
   unsigned long now = millis();
-  autoState   = AUTO_SETPOINT;
+  autoState   = AUTO_SELECT_SETPOINT;
   rampDone    = false;
-  integralSum = 0.0f;
-  pressStart  = 0;  
+  integralErrorSum = 0.0f;
+  buttonPressStartMs  = 0;  
 
   // --- Magnetfeld -> Durchmesser ---
-  float B = readMagnet_B_total_filtered();
-  float D = NAN;
-  if (B > 1e-6f && isfinite(B)) {
-    D = a * logf(B) + b;
+  float mag = ReadSensorEMA();
+  float diameterMm = NAN;
+  if (mag > 1e-6f && isfinite(mag)) {
+    diameterMm = calA * logf(mag) + calB;
   }
 
   // --- Anzeige + Serial alle 200 ms ---
@@ -618,24 +618,24 @@ void ManMode(){
   if (now - lastPrintTime >= 200) {
     lastPrintTime = now;
 
-    update_Display_Man(D);
+    Update_Display_Man(diameterMm);
 
     float t_s = now / 1000.0f;                  // Zeit in Sekunden
-    float v_m_per_min = berechneGeschwindigkeit(current_rpm);
+    float v_m_per_min = CalculateMetersPerMin(CurrentStepsPerS);
 
     Serial.print(t_s, 3);        
     Serial.print(';');
     Serial.print(v_m_per_min, 3); 
     Serial.print(';');
-    Serial.println(D, 3);        
+    Serial.println(diameterMm, 3);        
   }
 }
 
-int16_t berechneStepsAusDurchmesser(float d_soll) {
-   if (d_soll <= 0.1f) return 0;         // Schutz vor Division durch 0 oder Unsinn
+int16_t CalculateStepsPerSec(float targetDiameterMm) {
+   if (targetDiameterMm <= 0.1f) return 0;         // Schutz vor Division durch 0 oder Unsinn
 
   // 1. Prozessgeschwindigkeit berechnen (v = (C/d)^2)
-  float v_soll_m_min = powf(CONST_C / d_soll, 2.0f);
+  float v_soll_m_min = powf(CONST_C / targetDiameterMm, 2.0f);
 
   // 2. Umrechnung: m/min -> Steps/Sekunde
   // Herleitung aus deiner Funktion 'berechneGeschwindigkeit':
@@ -651,100 +651,100 @@ int16_t berechneStepsAusDurchmesser(float d_soll) {
   return (int16_t)steps_float;
 }
 
-void sendSpeedToSlave(int16_t speedSteps) {
+void sendSpeedToSlave(int16_t targetStepsPerSec) {
   Wire.beginTransmission(0x08);
   // Wir senden den int16 in zwei Bytes (High Byte, Low Byte)
-  Wire.write((uint8_t)((speedSteps >> 8) & 0xFF)); 
-  Wire.write((uint8_t)(speedSteps & 0xFF));
+  Wire.write((uint8_t)((targetStepsPerSec >> 8) & 0xFF)); 
+  Wire.write((uint8_t)(targetStepsPerSec & 0xFF));
   Wire.endTransmission();
 }
 
 void AutoMode() {
-  if (autoState != AUTO_SETPOINT) {           //Bus Recover Abfrage nuraußerhalb vom SetPoint
+  if (autoState != AUTO_SELECT_SETPOINT) {           //Bus Recover Abfrage nuraußerhalb vom SetPoint
     if (handleI2CRecoverHold()) return;
   }
 
   unsigned long now = millis();
   //static unsigned long lastWrite = 0;
   const unsigned long WRITE_PERIOD_MS = 200;
-  const unsigned long REG_Period = 10000;
+  const unsigned long CONTROL_PERIOD_MS = 10000;
   // --- Hold für Stellwert, wenn Regler "aus" ---
-  static int16_t holdCmdSteps = 0;
+  static int16_t holdCmdStepsPerSec = 0;
   static bool    holdValid    = false;
-  static unsigned long lastWriteFF  = 0;
-  static unsigned long lastWriteReg = 0;
+  static unsigned long lastWriteI2cWriteFFMs  = 0;
+  static unsigned long lastWriteI2cCtrlMs = 0;
 
   // --- 0) Sollwert Einstellen
-  if (autoState == AUTO_SETPOINT) {
-    if (encDelta != 0) {
-      sollDurchmesser += 0.005f * (float)encDelta;              // 0.01mm Schritte
+  if (autoState == AUTO_SELECT_SETPOINT) {
+    if (encoderDelta != 0) {
+      targetDiameterMm += 0.005f * (float)encoderDelta;              // 0.01mm Schritte
 
       // Limits setzen
-      if (sollDurchmesser < 1.50f) sollDurchmesser = 1.50f;
-      if (sollDurchmesser > 2.20f) sollDurchmesser = 2.20f;
+      if (targetDiameterMm < 1.50f) targetDiameterMm = 1.50f;
+      if (targetDiameterMm > 2.20f) targetDiameterMm = 2.20f;
 
-      encDelta = 0;   // WICHTIG: Delta "verbrauchen"
+      encoderDelta = 0;   // WICHTIG: Delta "verbrauchen"
     }
 
-    update_Display_Sollwahl(sollDurchmesser);
+    Update_Display_TargetMM(targetDiameterMm);
 
     // Bestätigen per Hold-to-confirm
-    if (digitalRead(PIN_CONFIRM) == HIGH) {
-      if (pressStart == 0) pressStart = now;
+    if (digitalRead(PIN_CONFIRM_BUTTON) == HIGH) {
+      if (buttonPressStartMs == 0) buttonPressStartMs = now;
 
-      if (now - pressStart >= 300) {
+      if (now - buttonPressStartMs >= 300) {
         // Warten bis Button wieder losgelassen wird
-        while (digitalRead(PIN_CONFIRM) == HIGH) {
+        while (digitalRead(PIN_CONFIRM_BUTTON) == HIGH) {
         delay(1);   // Mini-Delay gegen 100% CPU-Spin
         }
 
-        pressStart  = 0;
-        integralSum = 0.0f;
+        buttonPressStartMs  = 0;
+        integralErrorSum = 0.0f;
         rampDone    = false;               
-        autoState   = AUTO_FEEDFORWARD;    
+        autoState   = AUTO_FEEDFORWARD_ONLY;    
       }
-        if (now - pressStart >= 300) {
-          pressStart  = 0;
-          integralSum = 0.0f;
+        if (now - buttonPressStartMs >= 300) {
+          buttonPressStartMs  = 0;
+          integralErrorSum = 0.0f;
           rampDone    = false;                 // Regler noch AUS
-          autoState   = AUTO_FEEDFORWARD;      // weiter: Vorsteuerung-only
-          RegActive = false;
+          autoState   = AUTO_FEEDFORWARD_ONLY;      // weiter: Vorsteuerung-only
+          isControlActive = false;
           holdValid = false;
-          holdCmdSteps = 0;
-          lastWriteFF = now;
-          lastWriteReg = now;   // dt sauber
+          holdCmdStepsPerSec = 0;
+          lastWriteI2cWriteFFMs = now;
+          lastWriteI2cCtrlMs = now;   // dt sauber
         }
 
     } else {
-      pressStart = 0;
+      buttonPressStartMs = 0;
     }     
 
     return; // im SETPOINT-State nichts senden/regeln
   }
 
   // --- 1) Durchmesser messen (mit Schutz gegen log(<=0)) ---
-  float B = readMagnet_B_total_filtered();
-  float dIst = NAN;
-  if (B > 1e-6f && isfinite(B)) {
-  dIst = a * logf(B) + b;
+  float mag = ReadSensorEMA();
+  float measuredDiameterMm = NAN;
+  if (mag > 1e-6f && isfinite(mag)) {
+  measuredDiameterMm = calA * logf(mag) + calB;
   }
 
   // --- 2) Vorsteuerung berechnen und an Arduino senden (WRITE) ---
   if (!rampDone){
-    if (now - lastWriteFF >= WRITE_PERIOD_MS) {
-      lastWriteFF = now;
+    if (now - lastWriteI2cWriteFFMs >= WRITE_PERIOD_MS) {
+      lastWriteI2cWriteFFMs = now;
 
-      int16_t cmdSteps = 0;
+      int16_t cmdStepsPerSec = 0;
 
       // Nur senden, wenn running + gültiger Sensorwert
-      if (isrunning) {
-        cmdSteps = berechneStepsAusDurchmesser(sollDurchmesser);
+      if (isMotorRunning) {
+        cmdStepsPerSec = CalculateStepsPerSec(targetDiameterMm);
       } else {
-        cmdSteps = 0;
+        cmdStepsPerSec = 0;
       }
 
-      targetSpeed = cmdSteps;
-      sendSpeedToSlave(cmdSteps);
+      targetStepsPerS = cmdStepsPerSec;
+      sendSpeedToSlave(cmdStepsPerSec);
     }
   }
 
@@ -753,7 +753,7 @@ void AutoMode() {
 if (!rampDone) {
   static bool rampArm = false;
 
-  bool btn = (digitalRead(PIN_CONFIRM) == HIGH);
+  bool btn = (digitalRead(PIN_CONFIRM_BUTTON) == HIGH);
 
   // 0) Sperre nach Recover: erst einmal LOW gesehen -> dann freigeben,
   // und erst der NÄCHSTE Press darf wieder armen.
@@ -762,7 +762,7 @@ if (!rampDone) {
     if (!btn) {
       // Button ist LOW -> System wieder "neutral"
       blockRegStartUntilNewPress = false;
-      pressStart = 0;
+      buttonPressStartMs = 0;
       rampArm = false;
     }
     // egal was: in diesem Zustand keine Arm/Confirm-Logik
@@ -770,104 +770,104 @@ if (!rampDone) {
   else {
     // Normaler Ablauf
     if (btn) {
-      if (pressStart == 0) pressStart = now;
-      if (!rampArm && (now - pressStart >= 300)) {
+      if (buttonPressStartMs == 0) buttonPressStartMs = now;
+      if (!rampArm && (now - buttonPressStartMs >= 300)) {
         rampArm = true;  // wartet auf Release
       }
     } else {
       if (rampArm) {
         rampDone     = true;
-        integralSum  = 0.0f;
+        integralErrorSum  = 0.0f;
         holdValid    = false;
-        holdCmdSteps = 0;
+        holdCmdStepsPerSec = 0;
       }
-      pressStart = 0;
+      buttonPressStartMs = 0;
       rampArm = false;
     }
   }
 } else {
-  pressStart = 0;
+  buttonPressStartMs = 0;
 }
 
   // ---- 3) Regelung ----
   if (rampDone) {
-    if (now - lastWriteReg >= REG_Period) {
+    if (now - lastWriteI2cCtrlMs >= CONTROL_PERIOD_MS) {
 
-      float dt = (now - lastWriteReg) / 1000.0f;
-      lastWriteReg = now;
+      float dt = (now - lastWriteI2cCtrlMs) / 1000.0f;
+      lastWriteI2cCtrlMs = now;
 
-      int16_t cmdSteps = 0;
+      int16_t cmdStepsPerSec = 0;
 
     // Sicherheitsabfrage: Regeln wir nur, wenn der Motor läuft und der Sensor OK ist
 
-    if (isrunning && !isnan(dIst) && isfinite(dIst)) {
+    if (isMotorRunning && !isnan(measuredDiameterMm) && isfinite(measuredDiameterMm)) {
 
       // A) Vorsteuerung (Feedforward)
-      int16_t steps_feedforward = berechneStepsAusDurchmesser(sollDurchmesser);
+      int16_t steps_feedforward = CalculateStepsPerSec(targetDiameterMm);
 
       // B) Fehler
-      float abweichung = dIst - sollDurchmesser;
-      float errorAbs   = fabsf(abweichung);
+      float errorMM = measuredDiameterMm - targetDiameterMm;
+      float errorAbsMM   = fabsf(errorMM);
 
       // C) Deadband + Hysterese
-      if (!RegActive && errorAbs >= DB_IN_MM)  RegActive = true;
-      if ( RegActive && errorAbs <= DB_OUT_MM) RegActive = false;
+      if (!isControlActive && errorAbsMM >= DEADBAND_IN_MM)  isControlActive = true;
+      if ( isControlActive && errorAbsMM <= DEADBAND_OUT_MM) isControlActive = false;
 
       // D) Stellwert bilden
-      if (RegActive) {
+      if (isControlActive) {
         // Integral nur wenn aktiv
-        integralSum += abweichung * dt;
+        integralErrorSum += errorMM * dt;
 
         // Anti-Windup
-        if (integralSum >  INTEGRAL_MAX) integralSum =  INTEGRAL_MAX;
-        if (integralSum < -INTEGRAL_MAX) integralSum = -INTEGRAL_MAX;
+        if (integralErrorSum >  INTEGRAL_MAX) integralErrorSum =  INTEGRAL_MAX;
+        if (integralErrorSum < -INTEGRAL_MAX) integralErrorSum = -INTEGRAL_MAX;
 
-        float steps_correction = integralSum * REG_KI;
+        float steps_correction = integralErrorSum * KI_GAIN;
 
         int32_t cmd = (int32_t)steps_feedforward + (int32_t)lroundf(steps_correction);
         if (cmd < 0) cmd = 0;
         if (cmd > 3000) cmd = 3000;
 
-        cmdSteps = (int16_t)cmd;
+        cmdStepsPerSec = (int16_t)cmd;
 
         // HOLD updaten
-        holdCmdSteps = cmdSteps;
+        holdCmdStepsPerSec = cmdStepsPerSec;
         holdValid    = true;
 
       } else {
         // Regler AUS -> letzten Stellwert halten
         if (holdValid) {
-          cmdSteps = holdCmdSteps;
+          cmdStepsPerSec = holdCmdStepsPerSec;
         } else {
           // falls noch kein Hold existiert (z.B. direkt nach rampDone)
-          cmdSteps = steps_feedforward;
-          holdCmdSteps = cmdSteps;
+          cmdStepsPerSec = steps_feedforward;
+          holdCmdStepsPerSec = cmdStepsPerSec;
           holdValid = true;
         }
       }
 
       // Grenzwerte
-      if (cmdSteps < 0) cmdSteps = 0;
-      if (cmdSteps > 3000) cmdSteps = 3000;
+      if (cmdStepsPerSec < 0) cmdStepsPerSec = 0;
+      if (cmdStepsPerSec > 3000) cmdStepsPerSec = 3000;
 
     } else {
       // Motor aus oder Sensor ungültig: Integral resetten und Stop
-      cmdSteps = 0;
-      integralSum = 0.0f;
-      RegActive = false;
+      cmdStepsPerSec = 0;
+      integralErrorSum = 0.0f;
+      isControlActive = false;
       holdValid    = false;
-      holdCmdSteps = 0;
+      holdCmdStepsPerSec = 0;
     }
 
-    targetSpeed = cmdSteps;
-    sendSpeedToSlave(cmdSteps);
+    targetStepsPerS = cmdStepsPerSec;
+    sendSpeedToSlave(cmdStepsPerSec);
     }
   }
 
   // --- 4) Anzeige ---
-  if (millis() - lastDisp >= 150){
-    lastDisp = millis();
-    update_Display_Auto(sollDurchmesser, dIst, rampDone);
+  if (millis() - lastDisplayMs >= 150){
+    lastDisplayMs = millis();
+    update_Display_Auto(targetDiameterMm, measuredDiameterMm, rampDone);
   }
 
   // --- 5) Logging (optional, passt super fürs Tuning) ---
@@ -876,23 +876,22 @@ if (!rampDone) {
     lastPrint = now;
 
     float t_s = now / 1000.0f;
-    float v_m_per_min = berechneGeschwindigkeit(current_rpm);
+    float v_m_per_min = CalculateMetersPerMin(CurrentStepsPerS);
 
     Serial.print(t_s, 3);
     Serial.print(';');
     Serial.print(v_m_per_min, 3);
     Serial.print(';');
-    if (!isnan(dIst) && isfinite(dIst)) Serial.print(dIst, 3);
+    if (!isnan(measuredDiameterMm) && isfinite(measuredDiameterMm)) Serial.print(measuredDiameterMm, 3);
     else Serial.print("nan");
     Serial.print(';');
-    Serial.println(targetSpeed); // das was du sendest
+    Serial.println(targetStepsPerS); // das was du sendest
   }
 }
 
-
 void setup() {
   pinMode(LED_BUILTIN, OUTPUT);
-  pinMode(PIN_CONFIRM, INPUT_PULLDOWN);
+  pinMode(PIN_CONFIRM_BUTTON, INPUT_PULLDOWN);
 
   Serial.begin(115200);
   delay(2000);      // Damit Serial genug Zeit zum starten hat
@@ -925,13 +924,13 @@ void setup() {
 }
 
 void loop() {
-  static unsigned long lastI2C = 0;
+  static unsigned long lastI2cMs = 0;
   //static int i2cFailCount = 0;                // Für Bus Restart
   unsigned long now = millis();
 
-  static unsigned long hb = 0;                // LED Heartbeat für debug
-  if (millis() - hb > 250) {
-    hb = millis();
+  static unsigned long heartbeatMs = 0;                // LED Heartbeat für debug
+  if (millis() - heartbeatMs > 250) {
+    heartbeatMs = millis();
     digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
   }
 
@@ -939,32 +938,32 @@ void loop() {
     showMessage("Kalibrieren?\nKurz druecken: Nein\nLang Druecken: Ja", 1);
 
     // Warten bis der Knopf EINMAL gedrueckt wird (LOW -> HIGH)
-    while (digitalRead(PIN_CONFIRM) == LOW) {
+    while (digitalRead(PIN_CONFIRM_BUTTON) == LOW) {
       delay(50);   
     }
 
     unsigned long start = millis();
     delay(50);   // Entprellen
 
-    while(digitalRead(PIN_CONFIRM) == HIGH){
+    while(digitalRead(PIN_CONFIRM_BUTTON) == HIGH){
       if (millis()-start >= 2000){
         showMessage("Kalibrierung wird\ngestartet", 1);
         delay (2000);
-        modusKalibrierung();
+        RunCalibration();
       }
     }
     regressionDone = true;  // Frage nur einmal stellen
   }
 
-  if (!mode){
+  if (!isAutoMode){
     ManMode();
   }else{
     AutoMode();
   }
 
      // Zentraler I2C-Read: aktualisiert current_rpm/isrunning/mode
-  if (now - lastI2C >= 200) {
-    lastI2C = now;
+  if (now - lastI2cMs >= 200) {
+    lastI2cMs = now;
     requestData();
     /*bool ok = requestData();
     if (!ok) {
@@ -982,11 +981,11 @@ void loop() {
     i2cFailCount = 0;*/
 
     Serial.print("I2C OK: mode=");
-    Serial.print(mode);
+    Serial.print(isAutoMode);
     Serial.print(" running=");
-    Serial.print(isrunning);
+    Serial.print(isMotorRunning);
     Serial.print(" speed=");
-    Serial.println(current_rpm);
+    Serial.println(CurrentStepsPerS);
     //}
   }
 }

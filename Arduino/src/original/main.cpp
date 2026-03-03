@@ -36,8 +36,8 @@ int currentSpeed = 30;
 int desiredSpeed = 60;
 
 // Modus / Laufzustand
-bool mode = false;
-bool isrunning = false;
+bool isAutoMode = false;
+bool isMotorRunning = false;
 bool Controllmode = false;
 
 // Debounce für Encoder
@@ -90,19 +90,19 @@ void loop() {
   //unsigned long now = millis();                       --- Nicht Genutzt!!
 
   // Mode Button prüfen
-  mode = (digitalRead(modeButton) == LOW);
-  Controllmode = mode ? 1 : 0;
+  isAutoMode = (digitalRead(modeButton) == LOW);
+  Controllmode = isAutoMode ? 1 : 0;
 
     static bool lastMode = false;
-  if (mode != lastMode) {
+  if (isAutoMode != lastMode) {
     desiredSpeed = currentSpeed;  // aktuellen Wert übernehmen
-    lastMode = mode;
+    lastMode = isAutoMode;
   }
 
   // Start-Taster
   if (digitalRead(buttonStart) == LOW) {
  //   Serial.println("Start Button Pressed");
-    isrunning = true;
+    isMotorRunning = true;
     digitalWrite(outputLED, HIGH);
   }
 
@@ -112,7 +112,7 @@ void loop() {
     if (millis() - signalStartTime > stableTime) {
       signalStable = true;
     //  Serial.println("Stop Button Pressed");
-      isrunning = false;
+      isMotorRunning = false;
       digitalWrite(outputLED, LOW);
       stepper.setSpeed(0);
       // Encoderwert zurücksetzen optional
@@ -124,7 +124,7 @@ void loop() {
   }
 
   // Steuerung abhängig vom Modus
-  if (isrunning) {
+  if (isMotorRunning) {
     if (Controllmode == 0) {
       handleEncoder_Man();
     } else if (Controllmode == 1) {
@@ -184,11 +184,11 @@ void updateEncoder() {
 void requestEvent() {
   Wire.write((currentSpeed >> 8) & 0xFF);
   Wire.write(currentSpeed & 0xFF);
-  Wire.write(isrunning ? 1 : 0);
+  Wire.write(isMotorRunning ? 1 : 0);
   Wire.write(Controllmode ? 1 : 0);
 
   debugSpeed = currentSpeed;
-  debugRun   = isrunning;
+  debugRun   = isMotorRunning;
   debugMode  = Controllmode;
   sendFlag = true;
 }
