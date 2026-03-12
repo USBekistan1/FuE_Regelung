@@ -449,12 +449,14 @@ void Update_Display_Man(float measuredDiameterMm) {
   display.setTextSize(1.95);
   display.setTextColor(SH110X_WHITE);
   display.setCursor(0, 0);
-  display.print("Speed: ");
+
+  display.println("Man. Modus aktiv");
+  display.print("\nSpeed: ");
   //display.setCursor(0, 12);
-  display.println(speed_m_per_min, 1);
-  display.print(" m/min");
+  display.print(speed_m_per_min, 1);
+  display.println(" m/min");
   //display.setCursor(0,24);
-  display.println("Ist-Durchm.: ");
+  display.print("Ist-D.: ");
   //display.setCursor(0,36);
   display.println(measuredDiameterMm);
   display.println(" mm");
@@ -472,7 +474,10 @@ void update_Display_Auto(float targetDiameterMm, float measuredDiameterMm, bool 
   display.setTextColor(SH110X_WHITE);
   display.setCursor(0,0);
 
-  display.print("Soll: ");
+  display.print("AUTO: ");
+  display.println(rampDone ? "Regler aktiv" : "Vorsteuerung \n\nKnopf druecken wenn Durchm. stabil");
+
+  display.print("\nSoll: ");
   display.print(targetDiameterMm, 2);
   display.println(" mm");
 
@@ -484,8 +489,7 @@ void update_Display_Auto(float targetDiameterMm, float measuredDiameterMm, bool 
   display.print(speed_m_per_min, 1);
   display.println(" m/min");
 
-  display.print("AUTO: ");
-  display.println(rampDone ? "Regler aktiv" : "Vorsteuerung -> Knopf druecken wenn Durchm. stabil");
+
 
   //erial.println("OLED: before display()");
   display.display();
@@ -498,6 +502,9 @@ void Update_Display_TargetMM(float targetDiameterMm){
   display.setTextColor(SH110X_WHITE);
   display.setCursor(0,0);
 
+  display.println("Sollwert waehlen ");
+  display.println();
+  
   display.print("Soll: ");
   display.print(targetDiameterMm, 2);
   display.println(" mm");
