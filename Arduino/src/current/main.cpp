@@ -1,3 +1,30 @@
+/*
+ * Dieses Programm realisiert die lokale Motoransteuerung eines Extrusionssystems
+ * auf einem Arduino Uno. Es erzeugt die Schrittimpulse für den Schrittmotortreiber,
+ * verarbeitet Benutzereingaben und stellt die Schnittstelle zur übergeordneten
+ * Steuerung über den I2C-Bus bereit.
+ *
+ * Die Sollwertvorgabe erfolgt abhängig vom Betriebsmodus entweder manuell über
+ * einen Drehencoder oder automatisch durch Vorgabe eines externen Sollwerts.
+ * Eine Rampenfunktion begrenzt die Beschleunigung und ermöglicht einen gleichmäßigen
+ * Übergang zwischen Geschwindigkeitswerten.
+ *
+ * Hauptfunktionen:
+ * - Erzeugung von Schrittimpulsen über Timer1
+ * - Vorgabe der Drehrichtung und Schrittfrequenz für den Schrittmotor
+ * - Manuelle Sollwertvorgabe über einen Drehencoder
+ * - Umschaltung zwischen manuellem und automatischem Betrieb
+ * - Einlesen von Start- und Stoppsignalen
+ * - Austausch von Soll- und Istwerten mit einem Raspberry Pi Pico über I2C
+ *
+ * Betriebsmodi:
+ * - Manueller Modus: Sollwertvorgabe über den Encoder
+ * - Automatikmodus: Übernahme des Sollwerts über I2C
+ *
+ * Ziel des Programms ist eine zuverlässige und gleichmäßige Motoransteuerung
+ * sowie die koordinierte Zusammenarbeit mit der übergeordneten Regelung.
+ */
+
 #include <Wire.h>
 #include <Arduino.h>
 
