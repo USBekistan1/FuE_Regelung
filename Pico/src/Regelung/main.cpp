@@ -1,3 +1,28 @@
+/*
+ * Dieses Programm dient zur Messung, Anzeige und Regelung des Filamentdurchmessers
+ * in einem Extrusionsprozess. Die Durchmesserbestimmung erfolgt mithilfe eines
+ * TLx493D-3D-Hall-Sensors, dessen Messwerte durch einen exponentiellen gleitenden
+ * Mittelwert (EMA) gefiltert werden.
+ *
+ * Die Regelstrategie basiert auf einer Kombination aus modellbasierter Vorsteuerung
+ * und einer nachgeschalteten integralen Regelung zur Kompensation von Störeinflüssen.
+ *
+ * Hauptfunktionen:
+ * - Erfassung und Filterung der Magnetfelddaten
+ * - Umrechnung der Magnetfeldstärke in den Filamentdurchmesser
+ * - Durchführung und Speicherung einer Kalibrierung im Flash-Speicher
+ * - Kommunikation mit einem Arduino Uno über I2C zur Motoransteuerung
+ * - Implementierung einer I2C-Bus-Recovery zur Erhöhung der Systemstabilität
+ * - Bedienung über Taster sowie Anzeige der Betriebszustände auf einem OLED-Display
+ *
+ * Betriebsmodi:
+ * - Manueller Modus: Anzeige der Ist-Werte ohne aktive Regelung
+ * - Automatikmodus: Sollwertvorgabe, Vorsteuerung und geschlossene Regelung
+ *
+ * Ziel des Programms ist eine stabile und robuste Regelung des Filamentdurchmessers
+ * bei gleichzeitig hoher Störsicherheit in der Signalverarbeitung und Kommunikation.
+ */
+
 #include <Wire.h>                                                 //I2C
 #include <Adafruit_GFX.h>                                         //OLED
 #include <Adafruit_SH110X.h>                                      //OLED
@@ -41,7 +66,7 @@ void    AutoMode();
 int16_t CalculateStepsPerSec(float targetDiameterMm);
 float   CalculateMetersPerMin(long stepsPerSec);
 
-Adafruit_SH1106G display(128, 64, &Wire);                                 // Selber I2C Bus -> Display Updaterate checken!!
+Adafruit_SH1106G display(128, 64, &Wire);                                 // Gemeinsame I2C-Bus für Display und Sensor
 using namespace ifx::tlx493d;
 TLx493D_A1B6 Tlv493dMagnetic3DSensor(Wire, TLx493D_IIC_ADDR_A0_e);        // Selber Bus (Sensor & Display)
 
@@ -50,13 +75,13 @@ TLx493D_A1B6 Tlv493dMagnetic3DSensor(Wire, TLx493D_IIC_ADDR_A0_e);        // Sel
 
 #define CAL_SAMPLE_COUNT 9
 const float CAL_DIAMETERS_MM[CAL_SAMPLE_COUNT] = {1.0f, 1.2f, 1.4f, 1.6f, 1.7f, 1.75f, 1.8f, 1.9f, 2.0f};
-float calA = -1.1563, calB = 5.9946;                                              // Koeffizienten der Kalibrierungsgeraden
-float magSamples[CAL_SAMPLE_COUNT];    // Sensorwerte (B-Betrag)
+float calA = -1.1563, calB = 5.9946;        // Koeffizienten der Kalibrierungsgeraden
+float magSamples[CAL_SAMPLE_COUNT];         // Sensorwerte (B-Betrag)
 float diameterSamples[CAL_SAMPLE_COUNT];    // Referenzdurchmesser
 bool regressionDone = false;
 
 // ----- Flash-Speicher für Kalibrierung auf dem Pico -----
-#define FLASH_TARGET_OFFSET (256 * 1024)  // 256 kB hinter Programmanfang
+#define FLASH_TARGET_OFFSET (256 * 1024)      // 256 kB hinter Programmanfang
 #define CALIB_MAGIC_TAG 0x4E696C73            // 'Nils' als Magic
 
 struct CalibData {
@@ -83,10 +108,10 @@ const float CIRCUMFERENCE = PI * DIAMETER;      // Umfang in Metern
 static unsigned long lastDisplayMs = 0;
 
 // -------- I2C ----------
-volatile int16_t targetStepsPerS = 0;                                         // Zielgeschwindigkeit, 2 Byte
+volatile int16_t targetStepsPerS = 0;                                          // Zielgeschwindigkeit, 2 Byte
 volatile int16_t CurrentStepsPerS = 0;                                         // Ist-Geschwindigkeit
-volatile bool isAutoMode = false;                                               // Default Regelbetrieb
-volatile bool isMotorRunning = true;                                           // warum volatile? Keine ISR oder? Juckt wahrscheinlich nicht
+volatile bool isAutoMode = false;                                              // Default Regelbetrieb
+volatile bool isMotorRunning = true;                                           // Statusvariable für Motorzustand
 
 // --- I2C Bus Recovery (Pico Arduino) ---
 static const int I2C_SDA_PIN = 4;
@@ -94,9 +119,9 @@ static const int I2C_SCL_PIN = 5;
 volatile bool blockRegStartUntilNewPress = false;               //Kein Automatischer Regelstart nach Recovery
 
 // ---- Vorsteuerung ----
-const float CONST_C = 5.939;       // Prozesskonstante
-float targetDiameterMm = 1.75;       // Gewünschter Zieldurchmesser in mm
-int16_t calculatedStepsPerSec = 0;       // Der berechnete Wert für den Arduino
+const float CONST_C = 5.939;              // Prozesskonstante
+float targetDiameterMm = 1.75;            // Gewünschter Zieldurchmesser in mm
+int16_t calculatedStepsPerSec = 0;        // Der berechnete Wert für den Arduino
 bool rampDone = 0;
 static unsigned long buttonPressStartMs = 0;
 enum AutoState : uint8_t { AUTO_SELECT_SETPOINT, AUTO_FEEDFORWARD_ONLY, AUTO_CONTROL_ACTIVE };
@@ -143,7 +168,7 @@ float ReadSensorEMA() {
     failCount = 0;
     okCount++;
 
-    if (!emaInitialized) {                      // Erste EMA Werte ohen EMA (Initialisierung9)
+    if (!emaInitialized) {                      // Erste EMA Werte ohne EMA (Initialisierung9)
       emaX = (float)x;
       emaY = (float)y;
       emaZ = (float)z;
@@ -361,7 +386,7 @@ void RunCalibration() {
   regressionDone = true;
 
   // 5. Parameter anzeigen
-  showCalibrationParams(calA, calB);  // deine Anzeige-Funktion für a,b
+  showCalibrationParams(calA, calB);  // Anzeige der Kalibrierparameter
   delay(2000);
 
   // 6. Kalibrierung im Flash speichern
@@ -682,7 +707,7 @@ void AutoMode() {
       if (targetDiameterMm < 1.50f) targetDiameterMm = 1.50f;
       if (targetDiameterMm > 2.20f) targetDiameterMm = 2.20f;
 
-      encoderDelta = 0;   // WICHTIG: Delta "verbrauchen"
+      encoderDelta = 0;   // Encode-Differenz zurücksetzen nach Verarbeitung
     }
 
     Update_Display_TargetMM(targetDiameterMm);
@@ -869,7 +894,7 @@ if (!rampDone) {
     update_Display_Auto(targetDiameterMm, measuredDiameterMm, rampDone);
   }
 
-  // --- 5) Logging (optional, passt super fürs Tuning) ---
+  // --- 5) Logging (optional für Analysezwecke) ---
   static unsigned long lastPrint = 0;
   if (now - lastPrint >= 200) {
     lastPrint = now;
@@ -884,7 +909,7 @@ if (!rampDone) {
     if (!isnan(measuredDiameterMm) && isfinite(measuredDiameterMm)) Serial.print(measuredDiameterMm, 3);
     else Serial.print("nan");
     Serial.print(';');
-    Serial.println(targetStepsPerS); // das was du sendest
+    Serial.println(targetStepsPerS); // gesendeter Stellwert (Steps/s)
   }
 }
 
