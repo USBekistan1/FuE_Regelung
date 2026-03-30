@@ -318,7 +318,7 @@ bool handleI2CRecoverHold() {
 
 void RunCalibration() {
   const unsigned long CAL_WARMUP_MS = 500;   // Zeit, damit EMA sich auf neuen Stab einstellt
-  const unsigned long CAL_SETTLE_MS = 1000;  // Zeit, über die wir für den Mittelwert sampeln
+  const unsigned long CAL_SETTLE_MS = 1000;  // Zeit, über die für den Mittelwert gesampelt wird
   const unsigned long CAL_SAMPLE_DELAY_MS = 20;
 
   while (digitalRead(PIN_CONFIRM_BUTTON) == HIGH) {       // Warten bis Knopf wieder losgelassen wird
@@ -662,7 +662,7 @@ int16_t CalculateStepsPerSec(float targetDiameterMm) {
   float v_soll_m_min = powf(CONST_C / targetDiameterMm, 2.0f);
 
   // 2. Umrechnung: m/min -> Steps/Sekunde
-  // Herleitung aus deiner Funktion 'berechneGeschwindigkeit':
+  // Herleitung aus Funktion 'berechneGeschwindigkeit':
   // v_m_min = (steps / STEPS_PER_REV * 60) * CIRCUMFERENCE
   // => steps = (v_m_min * STEPS_PER_REV) / (60 * CIRCUMFERENCE)
   
@@ -677,7 +677,7 @@ int16_t CalculateStepsPerSec(float targetDiameterMm) {
 
 void sendSpeedToSlave(int16_t targetStepsPerSec) {
   Wire.beginTransmission(0x08);
-  // Wir senden den int16 in zwei Bytes (High Byte, Low Byte)
+  // int16 in zwei Bytes (High Byte, Low Byte)
   Wire.write((uint8_t)((targetStepsPerSec >> 8) & 0xFF)); 
   Wire.write((uint8_t)(targetStepsPerSec & 0xFF));
   Wire.endTransmission();
@@ -822,7 +822,7 @@ if (!rampDone) {
 
       int16_t cmdStepsPerSec = 0;
 
-    // Sicherheitsabfrage: Regeln wir nur, wenn der Motor läuft und der Sensor OK ist
+    // Sicherheitsabfrage: Geregelt wird nur, wenn der Motor läuft und der Sensor OK ist
 
     if (isMotorRunning && !isnan(measuredDiameterMm) && isfinite(measuredDiameterMm)) {
 
