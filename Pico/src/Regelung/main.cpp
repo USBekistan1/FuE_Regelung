@@ -119,19 +119,15 @@ static bool isControlActive = false;
 // Glättet die Magnetfeldmessung über X/Y/Z und gibt den Betrag zurück.
 
 float ReadSensorEMA() {
-  static uint32_t okCount = 0;
+  static uint32_t okCount = 0;                        // Erfolgreiches Auslese?
   static uint32_t failCount = 0;
   static unsigned long lastStatMs = 0;
 
-  const float EMA_TAU_S = 0.20f;
+  // ---- EMA Parameter ----
+  const float EMA_TAU_S = 0.20f;                      
   const float dt = SAMPLE_PERIOD_MS / 1000.0f;
   const float alpha = 1.0f - expf(-dt / EMA_TAU_S);
   const unsigned long now = millis();
-
-  //static unsigned long lastReinit = 0;
-  //const unsigned long REINIT_PERIOD_MS = 500;
-
-  static uint16_t failCount = 0;
 
   // 50 Hz gating
   if (now - emaLastSampleMs < SAMPLE_PERIOD_MS) {
@@ -141,27 +137,27 @@ float ReadSensorEMA() {
 
   double x, y, z;
 
-  bool ok = Tlv493dMagnetic3DSensor.getMagneticFieldAndTemperature(&x, &y, &z, nullptr);
+  bool ok = Tlv493dMagnetic3DSensor.getMagneticFieldAndTemperature(&x, &y, &z, nullptr);        // Sensor lesen erfolgreich?
 
   if (ok) {
     failCount = 0;
     okCount++;
 
-    if (!emaInitialized) {
+    if (!emaInitialized) {                      // Erste EMA Werte ohen EMA (Initialisierung9)
       emaX = (float)x;
       emaY = (float)y;
       emaZ = (float)z;
       emaInitialized = true;
-    } else {
+    } else {                                    // EMA nach Initialisierung
       emaX += alpha * ((float)x - emaX);
       emaY += alpha * ((float)y - emaY);
       emaZ += alpha * ((float)z - emaZ);
     }
 
-    emaLastMagnitude = sqrtf(emaX * emaX + emaY * emaY + emaZ * emaZ);
-  } else {
+    emaLastMagnitude = sqrtf(emaX * emaX + emaY * emaY + emaZ * emaZ);    // Ein Gesamtwert
+
+  } else {                                      // Lesen nicht erfolgreich
     emaInitialized = false;
-    failCount++;
     failCount++;
 
     /*if (now - lastReinit > REINIT_PERIOD_MS) {
@@ -172,12 +168,11 @@ float ReadSensorEMA() {
     }*/
 
     if (failCount >= 10) {
-      emaLastMagnitude = NAN;  // damit du später klar siehst, dass es wirklich tot ist
+      emaLastMagnitude = NAN;  // NAN Ausgabe auf Display
     }
-    // sonst: emaLastMagnitude bleibt letzter gültiger Wert
   }
 
-  // 1 Hz Statistik (wichtig: vor dem return!)
+  // 1 Hz Debug Ausgabe
   if (now - lastStatMs > 1000) {
     lastStatMs = now;
     if (Serial) {
@@ -191,7 +186,7 @@ float ReadSensorEMA() {
   return emaLastMagnitude;
 }
 
-void ResetMagEMA() {          //Frische Ema für jeden neuen Stab
+void ResetMagEMA() {          //Frische Ema für jeden neuen Stab -> Kein Mitschleppen alter Werte der anderen Stäbe
   emaInitialized = false;
   emaX = emaY = emaZ = 0.0f;
   emaLastMagnitude = 0.0f;
@@ -199,10 +194,7 @@ void ResetMagEMA() {          //Frische Ema für jeden neuen Stab
 }
 
 bool i2cRecoverBus() {
-  // 1) I2C "stoppen" – je nach Core gibt's kein Wire.end()
-  // Wir machen stattdessen GPIO-Recovery direkt.
-
-  // 2) Pins als GPIO open-drain-like: INPUT_PULLUP (High über Pullup)
+  // 1) Pins als GPIO open-drain-like: INPUT_PULLUP (High über Pullup)
   pinMode(I2C_SDA_PIN, INPUT_PULLUP);
   pinMode(I2C_SCL_PIN, INPUT_PULLUP);
   delayMicroseconds(5);
@@ -212,7 +204,7 @@ bool i2cRecoverBus() {
     return false;
   }
 
-  // 3) Wenn SDA LOW: versuche, den Slave "auszutakten"
+  // 2) Wenn SDA LOW: versuche, den Slave "auszutakten"
   if (digitalRead(I2C_SDA_PIN) == LOW) {
     pinMode(I2C_SCL_PIN, OUTPUT);
 
@@ -228,7 +220,7 @@ bool i2cRecoverBus() {
     delayMicroseconds(5);
   }
 
-  // 4) STOP condition erzwingen: SDA LOW -> SCL HIGH -> SDA HIGH
+  // 3) STOP condition erzwingen: SDA LOW -> SCL HIGH -> SDA HIGH
   pinMode(I2C_SDA_PIN, OUTPUT);
   digitalWrite(I2C_SDA_PIN, LOW);
   delayMicroseconds(5);
@@ -239,7 +231,7 @@ bool i2cRecoverBus() {
   pinMode(I2C_SDA_PIN, INPUT_PULLUP); // SDA HIGH (über Pullup) -> STOP
   delayMicroseconds(5);
 
-  // 5) I2C wieder initialisieren
+  // 4) I2C wieder initialisieren
   Wire.begin();
   Wire.setClock(50000);     
   Wire.setTimeout(50);      
@@ -251,7 +243,7 @@ bool i2cRecoverBus() {
 }
 
 bool handleI2CRecoverHold() {
-  const unsigned long RECOVER_HOLD_MS = 5000;
+  const unsigned long RECOVER_HOLD_MS = 5000;         // Benötigte Knopfdruckdauer
 
   static unsigned long holdStartMs = 0;
   static bool isArmed = true;
@@ -259,7 +251,7 @@ bool handleI2CRecoverHold() {
   unsigned long now = millis();
   bool isButtonPressed = (digitalRead(PIN_CONFIRM_BUTTON) == HIGH);
 
-  if (!isButtonPressed) {
+  if (!isButtonPressed) {         // Macht nichts, wenn Knopf nicht gedrückt
     holdStartMs = 0;
     isArmed = true;
     return false;
@@ -304,11 +296,11 @@ void RunCalibration() {
   const unsigned long CAL_SETTLE_MS = 1000;  // Zeit, über die wir für den Mittelwert sampeln
   const unsigned long CAL_SAMPLE_DELAY_MS = 20;
 
-  while (digitalRead(PIN_CONFIRM_BUTTON) == HIGH) {
+  while (digitalRead(PIN_CONFIRM_BUTTON) == HIGH) {       // Warten bis Knopf wieder losgelassen wird
       delay(50);
   }
 
-  for (int sampleIndex = 0; sampleIndex < CAL_SAMPLE_COUNT; sampleIndex++) {
+  for (int sampleIndex = 0; sampleIndex < CAL_SAMPLE_COUNT; sampleIndex++) {        // Abarbeiten der Prüfstäbe
     float diameterMm = CAL_DIAMETERS_MM[sampleIndex];
 
     // 1. Anzeige des aktuellen Prüfstabs
@@ -317,8 +309,7 @@ void RunCalibration() {
     Serial.println(line);
     showMessage(line, 2);
 
-    // 2. Auf Knopfdruck warten (INPUT_PULLDOWN + Taster an 3V3)
-    // warten bis gedrückt (LOW -> HIGH)
+    // 2. Auf Knopfdruck warten (LOW -> HIGH)
     while (digitalRead(PIN_CONFIRM_BUTTON) == LOW) {
       delay(50);
     }
@@ -327,7 +318,7 @@ void RunCalibration() {
       delay(50);
     }
 
-    ResetMagEMA();
+    ResetMagEMA();        // Reset für neuen Stab
 
     // 3a. WARMUP-PHASE: EMA darf sich auf den neuen Stab einstellen
     unsigned long startMs = millis();
@@ -341,15 +332,16 @@ void RunCalibration() {
     int   magCount = 0;
     startMs = millis();
 
-    while (millis() - startMs < CAL_SETTLE_MS) {
+    while (millis() - startMs < CAL_SETTLE_MS) {      // Summe der EMA Werte über Sample Zeit
       float magNow = ReadSensorEMA();
       magSum += magNow;
       magCount++;
       delay(CAL_SAMPLE_DELAY_MS);
     }
 
-    float magAvg = (magCount > 0) ? (magSum / magCount) : 0.0f;
-
+    float magAvg = (magCount > 0) ? (magSum / magCount) : 0.0f;     // Durchschnitt der Werte
+    
+    // Debug Ausgabe
     Serial.print("B_avg[");
     Serial.print(sampleIndex);
     Serial.print("] = ");
@@ -408,20 +400,20 @@ void CalculateLogCalibrationFit() {
 }
 
 bool loadCalibrationFromFlash() {
-    if (flashCalib->magic != CALIB_MAGIC_TAG) {
-        Serial.println("Flash-Kalibrierung: kein gueltiger Eintrag");
-        return false;
-    }
+  if (flashCalib->magic != CALIB_MAGIC_TAG) {
+      Serial.println("Flash-Kalibrierung: kein gueltiger Eintrag");
+      return false;
+  }
 
-    calA = flashCalib->calA;
-    calB = flashCalib->calB;
+  calA = flashCalib->calA;
+  calB = flashCalib->calB;
 
-    Serial.print("Flash-Kalibrierung geladen: a=");
-    Serial.print(calA, 6);
-    Serial.print(" , b=");
-    Serial.println(calB, 6);
+  Serial.print("Flash-Kalibrierung geladen: a=");
+  Serial.print(calA, 6);
+  Serial.print(" , b=");
+  Serial.println(calB, 6);
 
-    return true;
+  return true;
 }
 
 void SaveCalibrationToFlash(float newCalA, float newCalB) {
@@ -487,9 +479,9 @@ void update_Display_Auto(float targetDiameterMm, float measuredDiameterMm, bool 
   display.print("AUTO: ");
   display.println(rampDone ? "Regler aktiv" : "Vorsteuerung -> Knopf druecken wenn Durchm. stabil");
 
-  //erial.println("OLED: before display()");
+  //serial.println("OLED: before display()");
   display.display();
-  //Serial.println("OLED: after display()");
+  //serial.println("OLED: after display()");
 }
 
 void Update_Display_TargetMM(float targetDiameterMm){
@@ -565,7 +557,7 @@ void showCalibrationParams(float a, float b) {
 bool requestData() {
     const uint8_t expected = 6;
 
-    // Master fragt 4 Bytes beim Uno (Adresse 0x08) an
+    // Master fragt 6 Bytes beim Uno (Adresse 0x08) an
     uint8_t received = Wire.requestFrom(0x08, expected);  
 
     if (received != expected) {
@@ -592,7 +584,7 @@ bool requestData() {
 }
 
 float CalculateMetersPerMin(long stepsPerSec) {
-  float revsPerSec = (float)stepsPerSec / STEPS_PER_REV;  // Umdrehungen pro Sekunde
+  float revsPerSec = (float)stepsPerSec / STEPS_PER_REV;      // Umdrehungen pro Sekunde
   float revsPerMin = revsPerSec * 60.0;                       // U/min
   float v_mPerMin = CIRCUMFERENCE * revsPerMin;               // m/min
   return v_mPerMin;
